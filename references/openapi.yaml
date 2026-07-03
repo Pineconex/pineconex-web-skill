@@ -1,0 +1,649 @@
+openapi: 3.1.0
+info:
+  title: PineconeX API
+  version: "1.0.0"
+  description: >
+    Backtest and live-trade Pine Script v6 strategies on PineconeX. Authenticate with a
+    personal access token created in the web app under Account -> API keys, sent as
+    `Authorization: Bearer pcx_live_...`.
+  license:
+    name: CC BY 4.0
+    url: https://creativecommons.org/licenses/by/4.0/
+servers:
+  - url: https://pineconex.com
+    description: PineconeX production
+security:
+  - bearerAuth: []
+tags:
+  - name: Strategies
+  - name: Validate
+  - name: Jobs
+  - name: Data
+  - name: Brokers
+  - name: Account
+
+paths:
+  /api/strategies:
+    get:
+      operationId: listStrategies
+      tags: [Strategies]
+      summary: List your strategies (and ones shared with you).
+      responses:
+        "200":
+          description: Array of strategies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Strategy" }
+    post:
+      operationId: createStrategy
+      tags: [Strategies]
+      summary: Create a strategy from Pine Script v6 source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  description: Pine Script v6 source.
+      responses:
+        "201":
+          description: Created strategy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /api/strategies/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getStrategy
+      tags: [Strategies]
+      summary: Get one strategy.
+      responses:
+        "200":
+          description: The strategy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+    put:
+      operationId: updateStrategy
+      tags: [Strategies]
+      summary: Update a strategy's source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200":
+          description: Updated strategy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+    delete:
+      operationId: deleteStrategy
+      tags: [Strategies]
+      summary: Delete a strategy.
+      responses:
+        "204": { description: Deleted. }
+
+  /api/strategies/{id}/inputs:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getStrategyInputs
+      tags: [Strategies]
+      summary: The strategy's input.* fields (for parameter overrides).
+      responses:
+        "200":
+          description: Array of input specs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/InputSpec" }
+
+  /api/strategies/{id}/params:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getStrategyParams
+      tags: [Strategies]
+      summary: Current saved parameter overrides.
+      responses:
+        "200":
+          description: Saved overrides.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  params_json5: { type: string, nullable: true }
+    put:
+      operationId: saveStrategyParams
+      tags: [Strategies]
+      summary: Save parameter overrides.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [params_json5]
+              properties:
+                params_json5: { type: string }
+      responses:
+        "204": { description: Saved. }
+
+  /api/strategies/{id}/share:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    post:
+      operationId: setStrategyVisibility
+      tags: [Strategies]
+      summary: Set a strategy's visibility.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [visibility]
+              properties:
+                visibility:
+                  type: string
+                  enum: [private, shared_open, shared_protected]
+      responses:
+        "200": { description: Updated. }
+
+  /api/validate:
+    post:
+      operationId: validateStrategy
+      tags: [Validate]
+      summary: Compile-check a strategy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_id]
+              properties:
+                strategy_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Validation result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [valid, invalid] }
+                  errors: { type: array, items: { type: string } }
+                  warnings: { type: array, items: { type: string } }
+
+  /api/jobs:
+    get:
+      operationId: listJobs
+      tags: [Jobs]
+      summary: List recent jobs.
+      responses:
+        "200":
+          description: Array of jobs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Job" }
+
+  /api/jobs/backtest:
+    post:
+      operationId: launchBacktest
+      tags: [Jobs]
+      summary: Launch a backtest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BacktestRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /api/jobs/sweep:
+    post:
+      operationId: launchSweep
+      tags: [Jobs]
+      summary: Launch a parameter sweep.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SweepRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /api/jobs/walk-forward:
+    post:
+      operationId: launchWalkForward
+      tags: [Jobs]
+      summary: Launch a walk-forward analysis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WalkForwardRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /api/jobs/live:
+    post:
+      operationId: launchLiveBot
+      tags: [Jobs]
+      summary: Launch a live trading bot. Trades a real broker account — confirm intent first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LiveRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /api/jobs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getJob
+      tags: [Jobs]
+      summary: Get a job's status.
+      responses:
+        "200":
+          description: The job.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+    delete:
+      operationId: stopJob
+      tags: [Jobs]
+      summary: Stop or cancel a job.
+      responses:
+        "204": { description: Stopped. }
+
+  /api/jobs/{id}/results:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getJobResults
+      tags: [Jobs]
+      summary: Get a completed job's results.
+      responses:
+        "200":
+          description: Results JSON (shape varies by job type).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/jobs/{id}/analyse:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    post:
+      operationId: analyseJob
+      tags: [Jobs]
+      summary: AI analysis of a job's results (descriptive).
+      responses:
+        "200":
+          description: Analysis.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/data/symbols:
+    get:
+      operationId: listSymbols
+      tags: [Data]
+      summary: Available instruments.
+      responses:
+        "200":
+          description: Array of symbols.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Symbol" }
+
+  /api/data/catalog:
+    get:
+      operationId: listDataCatalog
+      tags: [Data]
+      summary: Cached OHLCV datasets.
+      responses:
+        "200":
+          description: Array of catalog entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CatalogEntry" }
+
+  /api/data/fetch:
+    post:
+      operationId: fetchData
+      tags: [Data]
+      summary: Download and cache OHLCV data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol_id, timeframe, from_date, to_date]
+              properties:
+                symbol_id: { type: string, format: uuid }
+                timeframe: { type: string, example: "1D" }
+                from_date: { type: string, format: date }
+                to_date: { type: string, format: date }
+                source: { type: string, default: yahoo }
+      responses:
+        "200":
+          description: The resulting catalog entry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CatalogEntry" }
+
+  /api/alpaca/status:
+    get:
+      operationId: alpacaStatus
+      tags: [Brokers]
+      summary: Alpaca connection status.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/saxo/status:
+    get:
+      operationId: saxoStatus
+      tags: [Brokers]
+      summary: Saxo connection status.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/ibkr/status:
+    get:
+      operationId: ibkrStatus
+      tags: [Brokers]
+      summary: Interactive Brokers connection status.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/lightspeed/status:
+    get:
+      operationId: lightspeedStatus
+      tags: [Brokers]
+      summary: Lightspeed connection status.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/auth/me:
+    get:
+      operationId: getProfile
+      tags: [Account]
+      summary: Your profile.
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    patch:
+      operationId: updateProfile
+      tags: [Account]
+      summary: Update profile fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/auth/keys:
+    get:
+      operationId: listApiKeys
+      tags: [Account]
+      summary: List your API keys (metadata only).
+      responses:
+        "200":
+          description: Array of keys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ApiKey" }
+    post:
+      operationId: createApiKey
+      tags: [Account]
+      summary: Mint an API key (browser session only — a key cannot mint keys).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: The new key (secret shown once).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+                  key_prefix: { type: string }
+                  key: { type: string, description: Plaintext key, shown once. }
+
+  /api/auth/keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    delete:
+      operationId: revokeApiKey
+      tags: [Account]
+      summary: Revoke an API key.
+      responses:
+        "204": { description: Revoked. }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A PineconeX personal access token (pcx_live_...).
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Strategy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [unvalidated, valid, invalid] }
+        content_hash: { type: string }
+        bytecode_hash: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+        visibility: { type: string, enum: [private, shared_open, shared_protected] }
+        share_token: { type: string, format: uuid, nullable: true }
+        is_owner: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        github_stem: { type: string, nullable: true }
+        params_json5: { type: string, nullable: true }
+    InputSpec:
+      type: object
+      description: One input.* field. Shape depends on `kind`.
+      properties:
+        kind: { type: string, enum: [int, float, bool, string] }
+        var_name: { type: string }
+        title: { type: string }
+        defval: {}
+        minval: { type: number, nullable: true }
+        maxval: { type: number, nullable: true }
+        step: { type: number }
+        options: { type: array, items: { type: string } }
+        swept: { type: boolean }
+    CommonJobRequest:
+      type: object
+      required: [strategy_id, symbol, timeframe, from_date, to_date, data_source]
+      properties:
+        strategy_id: { type: string, format: uuid }
+        symbol: { type: string, example: AAPL }
+        timeframe: { type: string, example: "1D", description: "1D, 1H, 15m, 5m, 1m, 1W, 1M" }
+        from_date: { type: string, format: date }
+        to_date: { type: string, format: date }
+        data_source: { type: string, example: yahoo, description: "yahoo, saxo, massive, ibkr, alpaca" }
+        htf_timeframe: { type: string, nullable: true }
+        htf_data_source: { type: string, nullable: true }
+        intrabar_timeframe: { type: string, nullable: true }
+        intrabar_data_source: { type: string, nullable: true }
+    ParamsOverride:
+      type: object
+      additionalProperties: true
+      description: "Map of input var_name -> number|bool (strings rejected)."
+    BacktestRequest:
+      allOf:
+        - $ref: "#/components/schemas/CommonJobRequest"
+        - type: object
+          properties:
+            params_override: { $ref: "#/components/schemas/ParamsOverride" }
+    SweepRequest:
+      allOf:
+        - $ref: "#/components/schemas/CommonJobRequest"
+        - type: object
+          required: [mode]
+          properties:
+            mode: { type: string, enum: [grid, random, bayesian, monte_carlo, rbf] }
+            trials: { type: integer, nullable: true }
+            restarts: { type: integer, nullable: true }
+            steps: { type: integer, nullable: true }
+            kappa: { type: number, nullable: true }
+    WalkForwardRequest:
+      allOf:
+        - $ref: "#/components/schemas/CommonJobRequest"
+        - type: object
+          properties:
+            n_windows: { type: integer, default: 5 }
+            is_pct: { type: number, default: 0.70, description: In-sample fraction 0..1. }
+            trials_per_window: { type: integer, default: 50 }
+    LiveRequest:
+      type: object
+      required: [strategy_id, symbol, timeframe]
+      properties:
+        strategy_id: { type: string, format: uuid }
+        symbol: { type: string }
+        timeframe: { type: string }
+        htf_timeframe: { type: string, nullable: true }
+        execute_orders: { type: boolean, default: true }
+        heartbeat_secs: { type: integer, nullable: true }
+        auto_restart: { type: boolean, default: false }
+        params_override: { $ref: "#/components/schemas/ParamsOverride" }
+        broker: { type: string, enum: [saxo, alpaca, ibkr, lightspeed], default: saxo }
+        saxo_env: { type: string, enum: [sim, live], nullable: true }
+        webhook_url: { type: string, nullable: true, description: http/https endpoint for order/trade/fill events. }
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        strategy_id: { type: string, format: uuid, nullable: true }
+        job_type: { type: string, enum: [backtest, sweep, walk_forward, live] }
+        status: { type: string, enum: [pending, running, completed, failed, cancelled, timeout] }
+        container_id: { type: string, nullable: true }
+        config: { type: object, additionalProperties: true }
+        auto_restart: { type: boolean }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        progress_done: { type: integer, nullable: true }
+        progress_total: { type: integer, nullable: true }
+        error_message: { type: string, nullable: true }
+    Symbol:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tv_symbol: { type: string }
+        display_name: { type: string }
+        index_name: { type: string }
+        yahoo_ticker: { type: string, nullable: true }
+        massive_ticker: { type: string, nullable: true }
+        ibkr_symbol: { type: string, nullable: true }
+        alpaca_us_symbol: { type: string, nullable: true }
+    CatalogEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        symbol_id: { type: string, format: uuid }
+        tv_symbol: { type: string }
+        display_name: { type: string }
+        index_name: { type: string }
+        source: { type: string }
+        timeframe: { type: string }
+        from_date: { type: string, format: date }
+        to_date: { type: string, format: date }
+        row_count: { type: integer }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        key_prefix: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }

@@ -36,9 +36,9 @@ Give Claude your API key in chat when it asks (or run the `curl` commands it pro
 2. Paste the contents of `SKILL.md` into **Instructions**, and upload
    `references/api-reference.md` under **Knowledge**.
 3. To let the GPT call PineconeX **directly**, add an **Action**:
+   - **Schema** → import the bundled [`references/openapi.yaml`](./references/openapi.yaml)
+     (paste its contents, or host it and paste the URL). It already targets `https://pineconex.com`.
    - **Authentication** → *API Key*, **Auth Type** *Bearer*, and paste your `pcx_live_…` key.
-   - **Schema** → an OpenAPI 3 spec whose server is `https://pineconex.com` and whose paths are
-     the endpoints in `api-reference.md`.
    - Without an Action the GPT still works — it will hand you the exact `curl` commands to run.
 
 Keep your API key private; anyone with it can act on your PineconeX account. Revoke a key any
@@ -48,6 +48,7 @@ time under **Account → API keys**.
 
 - [`SKILL.md`](./SKILL.md) — the skill definition (auth, workflows, guardrails).
 - [`references/api-reference.md`](./references/api-reference.md) — full endpoint reference.
+- [`references/openapi.yaml`](./references/openapi.yaml) — OpenAPI 3.1 spec for ChatGPT Actions.
 
 Full API docs: [https://github.com/Pineconex/pineconex-wep-api](https://github.com/Pineconex/pineconex-wep-api).
 
