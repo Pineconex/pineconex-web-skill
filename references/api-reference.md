@@ -142,8 +142,10 @@ webhook_url      string  optional  (http/https; receives order/trade/fill events
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
 ### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type; backtest = performance
 metrics, sweep = best params + trials, walk-forward = per-window OOS metrics)
-### GET /api/v1/jobs/{id}/logs — Server-Sent Events stream. EventSource can't send headers, so pass
-the key as `?token=pcx_live_…`.
+### GET /api/v1/jobs/{id}/logs — Server-Sent Events stream. Authenticate with the normal
+`Authorization: Bearer pcx_live_…` header and read the stream (e.g. `curl -N`). API keys are **not**
+accepted as a `?token=` query parameter (that path is reserved for the web UI's short-lived session
+token, since browser `EventSource` can't set headers).
 ### DELETE /api/v1/jobs/{id} — stop/cancel (live: soft-cancel kept in history; batch: hard delete)
 ### POST /api/v1/jobs/{id}/analyse — AI (descriptive) analysis of results
 
@@ -188,3 +190,16 @@ Response: the resulting catalog entry.
 ### POST /api/v1/auth/keys — mint a key. **Session-JWT only** (an API key cannot mint keys → 403).
 Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key` shown once.
 ### DELETE /api/v1/auth/keys/{id} — revoke → `204`
+
+---
+
+## Limits & errors
+
+- **Auth** is header-only: `Authorization: Bearer pcx_live_…`. Keys are never accepted in the URL
+  (query string) — including for the SSE logs stream.
+- **Rate limits (per user, `429`):** validation ≈ 20/min, job launches ≈ 30/min. On `429`, back off
+  and retry later — don't loop.
+- **Plan quotas (`403`):** concurrent running jobs and total strategies are capped by plan.
+- **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
+- **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.
+- **Errors** are `{ "error": string }` with the HTTP status; `401` = missing/invalid/expired key.

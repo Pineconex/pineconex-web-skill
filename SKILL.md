@@ -30,14 +30,18 @@ auth "$PINECONEX_API_URL/api/v1/strategies"
 ```
 
 If a call returns **401** the key is missing/invalid/revoked/expired — ask the user to mint a
-fresh one. **403** usually means a plan quota was hit.
+fresh one. **403** usually means a plan quota (concurrent jobs/strategies) was hit; **429** means a
+per-user rate limit (validation or job launches) — back off before retrying.
 
 ## Guardrails — read before acting
 
 - **Live bots trade real broker accounts with real or paper money.** Always confirm the symbol,
   broker, and intent with the user before `POST /api/v1/jobs/live` or before stopping a running bot.
-- **Respect quotas.** Free/Pro plans cap concurrent jobs and strategies; handle 403/429 by
-  telling the user the limit rather than retrying in a loop.
+- **Respect quotas and rate limits.** Plans cap concurrent jobs and strategies (`403` when hit); the
+  API also rate-limits validation (~20/min) and job launches (~30/min) per user (`429`). On either,
+  tell the user the limit and back off — don't retry in a tight loop.
+- **Auth goes in the header, never the URL.** Always `Authorization: Bearer <key>` (the `auth` helper
+  above) — API keys are not accepted as a `?token=` query parameter on any endpoint, including SSE logs.
 - Never print the API key or broker tokens in output.
 
 ## Core workflow: backtest a strategy
@@ -87,8 +91,8 @@ launch → poll → results shape. See `references/api-reference.md` for their r
        "broker":"alpaca", "webhook_url":"https://example.com/hook"
      }'
    ```
-4. Monitor: `GET /api/v1/jobs/<id>` for status, `GET /api/v1/jobs/<id>/logs` (SSE — the key also works
-   as a `?token=` query param for EventSource). Stop with `DELETE /api/v1/jobs/<id>`.
+4. Monitor: `GET /api/v1/jobs/<id>` for status, `GET /api/v1/jobs/<id>/logs` (SSE — stream it with the
+   `Authorization: Bearer` header, e.g. `curl -N`). Stop with `DELETE /api/v1/jobs/<id>`.
 
 ## Endpoint catalog
 
