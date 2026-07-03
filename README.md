@@ -50,7 +50,7 @@ time under **Account → API keys**.
 - [`references/api-reference.md`](./references/api-reference.md) — full endpoint reference.
 - [`references/openapi.yaml`](./references/openapi.yaml) — OpenAPI 3.1 spec for ChatGPT Actions.
 
-Full API docs: [https://github.com/Pineconex/pineconex-wep-api](https://github.com/Pineconex/pineconex-wep-api).
+Full API docs: [https://github.com/Pineconex/pineconex-web-api](https://github.com/Pineconex/pineconex-web-api).
 
 ## License
 
