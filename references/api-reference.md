@@ -4,7 +4,7 @@ The supported public surface. Base URL `https://pineconex.com` (override with `P
 All requests: `Authorization: Bearer pcx_live_…`. JSON bodies use `Content-Type: application/json`.
 
 Conventions: dates are `YYYY-MM-DD`; timestamps are ISO-8601 UTC; ids are UUIDs. Fields marked
-_optional_ may be omitted or sent as `null`. **`/api/admin/*` is not accessible with an API key.**
+_optional_ may be omitted or sent as `null`.
 
 ---
 

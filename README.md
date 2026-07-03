@@ -3,7 +3,7 @@
 A [Claude](https://claude.com) skill that lets Claude Code (or any agent that reads skills)
 drive a [PineconeX](https://pineconex.com) account over its web API — create and validate Pine
 Script v6 strategies, run backtests / sweeps / walk-forward analysis, and launch and monitor
-live trading bots. Admin functions are not exposed.
+live trading bots.
 
 ## Install
 

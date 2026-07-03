@@ -10,8 +10,8 @@ description: >-
 # PineconeX Web API
 
 PineconeX (https://pineconex.com) backtests and live-trades Pine Script v6 strategies.
-This skill lets you do everything a user can do in the web UI **except admin functions**,
-using a personal access token ("API key").
+This skill lets you do everything a user can do in the web UI, using a personal access
+token ("API key").
 
 ## Authentication
 
@@ -30,8 +30,7 @@ auth "$PINECONEX_API_URL/api/strategies"
 ```
 
 If a call returns **401** the key is missing/invalid/revoked/expired — ask the user to mint a
-fresh one. **403** on a normal endpoint usually means a plan quota; **403** on `/api/admin/*`
-is expected and permanent (API keys never grant admin — use the web UI for admin tasks).
+fresh one. **403** usually means a plan quota was hit.
 
 ## Guardrails — read before acting
 
@@ -39,7 +38,6 @@ is expected and permanent (API keys never grant admin — use the web UI for adm
   broker, and intent with the user before `POST /api/jobs/live` or before stopping a running bot.
 - **Respect quotas.** Free/Pro plans cap concurrent jobs and strategies; handle 403/429 by
   telling the user the limit rather than retrying in a loop.
-- **Admin is off-limits by key.** Don't attempt `/api/admin/*`; it returns 403 by design.
 - Never print the API key or broker tokens in output.
 
 ## Core workflow: backtest a strategy
@@ -92,7 +90,7 @@ launch → poll → results shape. See `references/api-reference.md` for their r
 4. Monitor: `GET /api/jobs/<id>` for status, `GET /api/jobs/<id>/logs` (SSE — the key also works
    as a `?token=` query param for EventSource). Stop with `DELETE /api/jobs/<id>`.
 
-## Endpoint catalog (non-admin surface)
+## Endpoint catalog
 
 | Area | Endpoints |
 |---|---|
