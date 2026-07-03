@@ -3,6 +3,9 @@
 The supported public surface. Base URL `https://pineconex.com` (override with `PINECONEX_API_URL`).
 All requests: `Authorization: Bearer pcx_live_…`. JSON bodies use `Content-Type: application/json`.
 
+**Versioning.** All endpoints live under `/api/v1`. `v1` stays stable; breaking changes ship as a
+new major version (`/api/v2`, …) so existing integrations keep working.
+
 Conventions: dates are `YYYY-MM-DD`; timestamps are ISO-8601 UTC; ids are UUIDs. Fields marked
 _optional_ may be omitted or sent as `null`.
 
@@ -10,12 +13,12 @@ _optional_ may be omitted or sent as `null`.
 
 ## Strategies
 
-### POST /api/strategies — create
+### POST /api/v1/strategies — create
 Request: `{ "code": "<pine v6 source>" }` (required).
 Response `201`: `StrategyResponse` (below). `name`/`description` are parsed from the source;
 `status` starts `"unvalidated"`.
 
-### GET /api/strategies — list
+### GET /api/v1/strategies — list
 Response: array of `StrategyResponse`.
 
 **StrategyResponse**
@@ -36,25 +39,25 @@ github_stem   string | null
 params_json5  string | null
 ```
 
-### GET /api/strategies/{id} — get one   ·   PUT /api/strategies/{id} — update (`{code}`)   ·   DELETE /api/strategies/{id}
+### GET /api/v1/strategies/{id} — get one   ·   PUT /api/v1/strategies/{id} — update (`{code}`)   ·   DELETE /api/v1/strategies/{id}
 
-### GET /api/strategies/{id}/inputs
+### GET /api/v1/strategies/{id}/inputs
 Response: array of input specs (the strategy's `input.*` variables), used to build parameter
 overrides. Each has `kind` plus `var_name`, `title`, `defval`, `swept`, and kind-specific fields:
 - `int` / `float`: `minval`, `maxval` (optional), `step`
 - `bool`: (just defval)
 - `string`: `options: [string]`
 
-### GET /api/strategies/{id}/params → `{ "params_json5": string|null }`
-### PUT /api/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
+### GET /api/v1/strategies/{id}/params → `{ "params_json5": string|null }`
+### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
 
-### POST /api/strategies/{id}/share — set visibility (`{ "visibility": "private"|"shared_open"|"shared_protected" }`)
+### POST /api/v1/strategies/{id}/share — set visibility (`{ "visibility": "private"|"shared_open"|"shared_protected" }`)
 
 ---
 
 ## Validate
 
-### POST /api/validate
+### POST /api/v1/validate
 Request: `{ "strategy_id": uuid }`.
 Response: `{ "status": "valid"|"invalid", "errors": [string], "warnings": [string] }`.
 
@@ -62,7 +65,7 @@ Response: `{ "status": "valid"|"invalid", "errors": [string], "warnings": [strin
 
 ## Jobs
 
-All launch endpoints return **`201`** with a `JobResponse`. Poll `GET /api/jobs/{id}` for `status`.
+All launch endpoints return **`201`** with a `JobResponse`. Poll `GET /api/v1/jobs/{id}` for `status`.
 
 **JobResponse**
 ```
@@ -95,13 +98,13 @@ intrabar_timeframe    string  optional   (request.security_lower_tf)
 intrabar_data_source  string  optional
 ```
 
-### POST /api/jobs/backtest
+### POST /api/v1/jobs/backtest
 Above fields, plus:
 ```
 params_override  object  optional   { var_name: number|bool }  (strings rejected)
 ```
 
-### POST /api/jobs/sweep
+### POST /api/v1/jobs/sweep
 Above common fields, plus:
 ```
 mode      "grid"|"random"|"bayesian"|"monte_carlo"|"rbf"   required
@@ -112,7 +115,7 @@ kappa     float optional   (bayesian UCB exploration)
 ```
 Which `input.*` vars are swept comes from the strategy (`GET .../inputs`, `swept: true`).
 
-### POST /api/jobs/walk-forward
+### POST /api/v1/jobs/walk-forward
 Above common fields, plus:
 ```
 n_windows          int    optional  (default 5)
@@ -120,7 +123,7 @@ is_pct             float  optional  (default 0.70; in-sample fraction 0..1)
 trials_per_window  int    optional  (default 50)
 ```
 
-### POST /api/jobs/live
+### POST /api/v1/jobs/live
 ```
 strategy_id      uuid    required
 symbol           string  required
@@ -135,32 +138,32 @@ saxo_env         string  optional  ("sim"|"live"; Saxo only)
 webhook_url      string  optional  (http/https; receives order/trade/fill events)
 ```
 
-### GET /api/jobs — list (recent) → array of `JobResponse`
-### GET /api/jobs/{id} — one `JobResponse` (status synced from runner if still running)
-### GET /api/jobs/{id}/results — metrics JSON (shape varies by job_type; backtest = performance
+### GET /api/v1/jobs — list (recent) → array of `JobResponse`
+### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
+### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type; backtest = performance
 metrics, sweep = best params + trials, walk-forward = per-window OOS metrics)
-### GET /api/jobs/{id}/logs — Server-Sent Events stream. EventSource can't send headers, so pass
+### GET /api/v1/jobs/{id}/logs — Server-Sent Events stream. EventSource can't send headers, so pass
 the key as `?token=pcx_live_…`.
-### DELETE /api/jobs/{id} — stop/cancel (live: soft-cancel kept in history; batch: hard delete)
-### POST /api/jobs/{id}/analyse — AI (descriptive) analysis of results
+### DELETE /api/v1/jobs/{id} — stop/cancel (live: soft-cancel kept in history; batch: hard delete)
+### POST /api/v1/jobs/{id}/analyse — AI (descriptive) analysis of results
 
 ---
 
 ## Data
 
-### GET /api/data/symbols → array
+### GET /api/v1/data/symbols → array
 ```
 id, tv_symbol, display_name, index_name,
 yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null
 ```
 
-### GET /api/data/catalog → array of cached OHLCV datasets
+### GET /api/v1/data/catalog → array of cached OHLCV datasets
 ```
 id, symbol_id, tv_symbol, display_name, index_name,
 source, timeframe, from_date, to_date, row_count, updated_at, expires_at|null
 ```
 
-### POST /api/data/fetch — download/cache OHLCV
+### POST /api/v1/data/fetch — download/cache OHLCV
 ```
 symbol_id  uuid    required
 timeframe  string  required
@@ -174,14 +177,14 @@ Response: the resulting catalog entry.
 
 ## Brokers (status only via API; connect/OAuth is web-UI only)
 
-`GET /api/alpaca/status` · `GET /api/saxo/status` · `GET /api/ibkr/status` · `GET /api/lightspeed/status`
+`GET /api/v1/alpaca/status` · `GET /api/v1/saxo/status` · `GET /api/v1/ibkr/status` · `GET /api/v1/lightspeed/status`
 
 ---
 
 ## Account & keys
 
-### GET /api/auth/me → profile   ·   PATCH /api/auth/me — update profile fields
-### GET /api/auth/keys → list your keys (metadata only; never the secret)
-### POST /api/auth/keys — mint a key. **Session-JWT only** (an API key cannot mint keys → 403).
+### GET /api/v1/auth/me → profile   ·   PATCH /api/v1/auth/me — update profile fields
+### GET /api/v1/auth/keys → list your keys (metadata only; never the secret)
+### POST /api/v1/auth/keys — mint a key. **Session-JWT only** (an API key cannot mint keys → 403).
 Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key` shown once.
-### DELETE /api/auth/keys/{id} — revoke → `204`
+### DELETE /api/v1/auth/keys/{id} — revoke → `204`

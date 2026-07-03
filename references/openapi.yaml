@@ -23,7 +23,7 @@ tags:
   - name: Account
 
 paths:
-  /api/strategies:
+  /api/v1/strategies:
     get:
       operationId: listStrategies
       tags: [Strategies]
@@ -58,7 +58,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Strategy" }
 
-  /api/strategies/{id}:
+  /api/v1/strategies/{id}:
     parameters:
       - $ref: "#/components/parameters/PathId"
     get:
@@ -97,7 +97,7 @@ paths:
       responses:
         "204": { description: Deleted. }
 
-  /api/strategies/{id}/inputs:
+  /api/v1/strategies/{id}/inputs:
     parameters:
       - $ref: "#/components/parameters/PathId"
     get:
@@ -113,7 +113,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/InputSpec" }
 
-  /api/strategies/{id}/params:
+  /api/v1/strategies/{id}/params:
     parameters:
       - $ref: "#/components/parameters/PathId"
     get:
@@ -145,7 +145,7 @@ paths:
       responses:
         "204": { description: Saved. }
 
-  /api/strategies/{id}/share:
+  /api/v1/strategies/{id}/share:
     parameters:
       - $ref: "#/components/parameters/PathId"
     post:
@@ -166,7 +166,7 @@ paths:
       responses:
         "200": { description: Updated. }
 
-  /api/validate:
+  /api/v1/validate:
     post:
       operationId: validateStrategy
       tags: [Validate]
@@ -192,7 +192,7 @@ paths:
                   errors: { type: array, items: { type: string } }
                   warnings: { type: array, items: { type: string } }
 
-  /api/jobs:
+  /api/v1/jobs:
     get:
       operationId: listJobs
       tags: [Jobs]
@@ -206,7 +206,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Job" }
 
-  /api/jobs/backtest:
+  /api/v1/jobs/backtest:
     post:
       operationId: launchBacktest
       tags: [Jobs]
@@ -223,7 +223,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
-  /api/jobs/sweep:
+  /api/v1/jobs/sweep:
     post:
       operationId: launchSweep
       tags: [Jobs]
@@ -240,7 +240,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
-  /api/jobs/walk-forward:
+  /api/v1/jobs/walk-forward:
     post:
       operationId: launchWalkForward
       tags: [Jobs]
@@ -257,7 +257,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
-  /api/jobs/live:
+  /api/v1/jobs/live:
     post:
       operationId: launchLiveBot
       tags: [Jobs]
@@ -274,7 +274,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
-  /api/jobs/{id}:
+  /api/v1/jobs/{id}:
     parameters:
       - $ref: "#/components/parameters/PathId"
     get:
@@ -294,7 +294,7 @@ paths:
       responses:
         "204": { description: Stopped. }
 
-  /api/jobs/{id}/results:
+  /api/v1/jobs/{id}/results:
     parameters:
       - $ref: "#/components/parameters/PathId"
     get:
@@ -308,7 +308,7 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
-  /api/jobs/{id}/analyse:
+  /api/v1/jobs/{id}/analyse:
     parameters:
       - $ref: "#/components/parameters/PathId"
     post:
@@ -322,7 +322,7 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
-  /api/data/symbols:
+  /api/v1/data/symbols:
     get:
       operationId: listSymbols
       tags: [Data]
@@ -336,7 +336,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Symbol" }
 
-  /api/data/catalog:
+  /api/v1/data/catalog:
     get:
       operationId: listDataCatalog
       tags: [Data]
@@ -350,7 +350,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/CatalogEntry" }
 
-  /api/data/fetch:
+  /api/v1/data/fetch:
     post:
       operationId: fetchData
       tags: [Data]
@@ -375,7 +375,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CatalogEntry" }
 
-  /api/alpaca/status:
+  /api/v1/alpaca/status:
     get:
       operationId: alpacaStatus
       tags: [Brokers]
@@ -386,7 +386,7 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
-  /api/saxo/status:
+  /api/v1/saxo/status:
     get:
       operationId: saxoStatus
       tags: [Brokers]
@@ -397,7 +397,7 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
-  /api/ibkr/status:
+  /api/v1/ibkr/status:
     get:
       operationId: ibkrStatus
       tags: [Brokers]
@@ -408,7 +408,7 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
-  /api/lightspeed/status:
+  /api/v1/lightspeed/status:
     get:
       operationId: lightspeedStatus
       tags: [Brokers]
@@ -420,7 +420,7 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
-  /api/auth/me:
+  /api/v1/auth/me:
     get:
       operationId: getProfile
       tags: [Account]
@@ -447,7 +447,7 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
-  /api/auth/keys:
+  /api/v1/auth/keys:
     get:
       operationId: listApiKeys
       tags: [Account]
@@ -486,7 +486,7 @@ paths:
                   key_prefix: { type: string }
                   key: { type: string, description: Plaintext key, shown once. }
 
-  /api/auth/keys/{id}:
+  /api/v1/auth/keys/{id}:
     parameters:
       - $ref: "#/components/parameters/PathId"
     delete:
