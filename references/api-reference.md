@@ -186,6 +186,8 @@ Response: the resulting catalog entry.
 ## Account & keys
 
 ### GET /api/v1/auth/me → profile   ·   PATCH /api/v1/auth/me — update profile fields
+### GET /api/v1/newsletter/me → `{ "subscribed": bool }`   ·   PUT /api/v1/newsletter/me — body `{ "subscribed": bool }` → `{ "subscribed": bool }`
+Opt your account in or out of the product-updates newsletter (keyed by your account email).
 ### GET /api/v1/auth/keys → list your keys (metadata only; never the secret)
 ### POST /api/v1/auth/keys — mint a key. **Session-JWT only** (an API key cannot mint keys → 403).
 Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key` shown once.

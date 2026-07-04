@@ -447,6 +447,43 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
+  /api/v1/newsletter/me:
+    get:
+      operationId: getNewsletterStatus
+      tags: [Account]
+      summary: Whether your account is subscribed to the product newsletter.
+      responses:
+        "200":
+          description: Subscription status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscribed: { type: boolean }
+    put:
+      operationId: setNewsletterStatus
+      tags: [Account]
+      summary: Opt your account in or out of the product newsletter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscribed]
+              properties:
+                subscribed: { type: boolean }
+      responses:
+        "200":
+          description: Updated subscription status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscribed: { type: boolean }
+
   /api/v1/auth/keys:
     get:
       operationId: listApiKeys

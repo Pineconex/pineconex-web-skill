@@ -103,7 +103,7 @@ launch → poll → results shape. See `references/api-reference.md` for their r
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,walk-forward,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed}/status` |
-| Account | `GET/PATCH /api/v1/auth/me`, `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
+| Account | `GET/PATCH /api/v1/auth/me`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
 
 Full request/response field shapes: **`references/api-reference.md`** (read it when you need
 exact field names, optional vs. required, or the `inputs`/`params` formats for parameter overrides).
