@@ -30,8 +30,10 @@ auth "$PINECONEX_API_URL/api/v1/strategies"
 ```
 
 If a call returns **401** the key is missing/invalid/revoked/expired — ask the user to mint a
-fresh one. **403** usually means a plan quota (concurrent jobs/strategies) was hit; **429** means a
-per-user rate limit (validation or job launches) — back off before retrying.
+fresh one. **403** means either a plan quota (concurrent jobs/strategies) was hit, or the endpoint
+requires a higher plan — notably live trading (`POST /api/v1/jobs/live`) needs a **Pro plan or
+higher**, so a free-plan key is rejected. **429** means a per-user rate limit (validation or job
+launches) — back off before retrying.
 
 ## Guardrails — read before acting
 

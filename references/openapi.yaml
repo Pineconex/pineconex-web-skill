@@ -262,6 +262,8 @@ paths:
       operationId: launchLiveBot
       tags: [Jobs]
       summary: Launch a live trading bot. Trades a real broker account — confirm intent first.
+      description: >-
+        Requires a Pro plan or higher. Free-plan API keys are rejected with 403.
       requestBody:
         required: true
         content:
@@ -273,6 +275,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "403":
+          description: >-
+            Plan does not permit live trading (requires Pro or higher), or a plan
+            quota (concurrent jobs) was hit.
 
   /api/v1/jobs/{id}:
     parameters:

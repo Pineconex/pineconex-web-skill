@@ -89,7 +89,7 @@ Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`
 ```
 strategy_id           uuid    required
 symbol                string  required   (e.g. "AAPL")
-timeframe             string  required   ("1D","1H","15m","5m","1m","1W","1M")
+timeframe             string  required   ("1m","5m","15m","30m","60m","90m","1D","1W","1M"; case-sensitive: 1M=monthly, 1m=1min; 1H/1h alias→60m; other→400)
 from_date, to_date    date    required
 data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca")
 htf_timeframe         string  optional   (higher timeframe for request.security)
@@ -123,11 +123,11 @@ is_pct             float  optional  (default 0.70; in-sample fraction 0..1)
 trials_per_window  int    optional  (default 50)
 ```
 
-### POST /api/v1/jobs/live
+### POST /api/v1/jobs/live — **Pro plan or higher** (free-plan keys get `403`)
 ```
 strategy_id      uuid    required
 symbol           string  required
-timeframe        string  required
+timeframe        string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no weekly/monthly/1m)
 htf_timeframe    string  optional
 execute_orders   bool    optional  (default true)
 heartbeat_secs   int     optional
@@ -202,6 +202,9 @@ Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key`
 - **Rate limits (per user, `429`):** validation ≈ 20/min, job launches ≈ 30/min. On `429`, back off
   and retry later — don't loop.
 - **Plan quotas (`403`):** concurrent running jobs and total strategies are capped by plan.
+- **Pro-gated features (`403`):** live trading (`POST /jobs/live`) requires a Pro plan or
+  higher; free-plan keys are rejected. Backtest, sweep, and walk-forward are available on all
+  plans (subject to the concurrent-job quota above).
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
 - **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.
 - **Errors** are `{ "error": string }` with the HTTP status; `401` = missing/invalid/expired key.
