@@ -240,16 +240,20 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
-  /api/v1/jobs/walk-forward:
+  /api/v1/jobs/robustness:
     post:
-      operationId: launchWalkForward
+      operationId: launchRobustness
       tags: [Jobs]
-      summary: Launch a walk-forward analysis.
+      summary: Launch a permutation (Monte Carlo significance) test.
+      description: >-
+        Bar-permutes the price series N times, re-runs the strategy on each (with its
+        authored input defaults), and reports a p-value on whether the edge is real
+        structure or luck. Available on all plans.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/WalkForwardRequest" }
+            schema: { $ref: "#/components/schemas/RobustnessRequest" }
       responses:
         "201":
           description: Job created.
@@ -617,14 +621,15 @@ components:
             restarts: { type: integer, nullable: true }
             steps: { type: integer, nullable: true }
             kappa: { type: number, nullable: true }
-    WalkForwardRequest:
+    RobustnessRequest:
       allOf:
         - $ref: "#/components/schemas/CommonJobRequest"
         - type: object
           properties:
-            n_windows: { type: integer, default: 5 }
-            is_pct: { type: number, default: 0.70, description: In-sample fraction 0..1. }
-            trials_per_window: { type: integer, default: 50 }
+            permutations: { type: integer, default: 200, description: Null-distribution size (1..2000). }
+            metric: { type: string, enum: [net_pnl_pct, profit_factor, win_rate], default: net_pnl_pct, description: Statistic the p-value is computed on. }
+            block_size: { type: integer, default: 1, description: "1 = single-bar permutation (destroys all serial structure); >1 = block permutation (shuffle N-bar chunks, preserving shorter structure). Range 1..1000." }
+            seed: { type: integer, nullable: true, description: RNG seed; omit for time-seeded. Effective seed is echoed in results. }
     LiveRequest:
       type: object
       required: [strategy_id, symbol, timeframe]
@@ -645,7 +650,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         strategy_id: { type: string, format: uuid, nullable: true }
-        job_type: { type: string, enum: [backtest, sweep, walk_forward, live] }
+        job_type: { type: string, enum: [backtest, sweep, robustness, live] }
         status: { type: string, enum: [pending, running, completed, failed, cancelled, timeout] }
         container_id: { type: string, nullable: true }
         config: { type: object, additionalProperties: true }

@@ -71,21 +71,21 @@ All launch endpoints return **`201`** with a `JobResponse`. Poll `GET /api/v1/jo
 ```
 id             uuid
 strategy_id    uuid | null
-job_type       "backtest" | "sweep" | "walk_forward" | "live"
+job_type       "backtest" | "sweep" | "robustness" | "live"
 status         "pending" | "running" | "completed" | "failed" | "cancelled" | "timeout"
 container_id   string | null
 config         object            (serialized JobConfig; varies by job_type)
 auto_restart   bool              (live only; else false)
 created_at     datetime
 finished_at    datetime | null
-progress_done  int | null        (sweep/walk-forward)
+progress_done  int | null        (sweep/robustness)
 progress_total int | null
 error_message  string | null
 ```
 
 Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`, `running`.
 
-### Fields common to backtest / sweep / walk-forward
+### Fields common to backtest / sweep / robustness
 ```
 strategy_id           uuid    required
 symbol                string  required   (e.g. "AAPL")
@@ -115,13 +115,25 @@ kappa     float optional   (bayesian UCB exploration)
 ```
 Which `input.*` vars are swept comes from the strategy (`GET .../inputs`, `swept: true`).
 
-### POST /api/v1/jobs/walk-forward
+### POST /api/v1/jobs/robustness
+Permutation (Monte Carlo significance) test: bar-permutes the price series N times,
+re-runs the strategy on each, and reports a p-value on whether the edge is real
+structure or luck. Runs the strategy with its authored input defaults (no sweep).
 Above common fields, plus:
 ```
-n_windows          int    optional  (default 5)
-is_pct             float  optional  (default 0.70; in-sample fraction 0..1)
-trials_per_window  int    optional  (default 50)
+permutations  int     optional  (default 200; 1..2000 — the null-distribution size)
+metric        string  optional  ("net_pnl_pct"(default)|"profit_factor"|"win_rate";
+                                  the statistic the p-value is computed on)
+block_size    int     optional  (default 1; 1..1000. 1 = single-bar permutation
+                                  (destroys all serial structure); >1 = block
+                                  permutation (shuffle N-bar chunks, preserving
+                                  structure shorter than N — a less strict null))
+seed          int     optional  (RNG seed; omit for a time-seeded run. The effective
+                                  seed is echoed back in the results for reproducibility)
 ```
+Results (`GET .../results`) include: `p_value`, `observed_stat`, the `null_dist` array
+(+ mean/sd/percentiles), `hurst` + `variance_ratio` (structure of the price series,
+strategy-independent), and the echoed `permutations`/`block_size`/`metric`/`seed`.
 
 ### POST /api/v1/jobs/live — **Pro plan or higher** (free-plan keys get `403`)
 ```
@@ -141,7 +153,8 @@ webhook_url      string  optional  (http/https; receives order/trade/fill events
 ### GET /api/v1/jobs — list (recent) → array of `JobResponse`
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
 ### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type; backtest = performance
-metrics, sweep = best params + trials, walk-forward = per-window OOS metrics)
+metrics + `hurst`/`variance_ratio`, sweep = best params + trials, robustness = `p_value` + null
+distribution + `hurst`/`variance_ratio`)
 ### GET /api/v1/jobs/{id}/logs — Server-Sent Events stream. Authenticate with the normal
 `Authorization: Bearer pcx_live_…` header and read the stream (e.g. `curl -N`). API keys are **not**
 accepted as a `?token=` query parameter (that path is reserved for the web UI's short-lived session
@@ -203,7 +216,7 @@ Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key`
   and retry later — don't loop.
 - **Plan quotas (`403`):** concurrent running jobs and total strategies are capped by plan.
 - **Pro-gated features (`403`):** live trading (`POST /jobs/live`) requires a Pro plan or
-  higher; free-plan keys are rejected. Backtest, sweep, and walk-forward are available on all
+  higher; free-plan keys are rejected. Backtest, sweep, and robustness are available on all
   plans (subject to the concurrent-job quota above).
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
 - **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.

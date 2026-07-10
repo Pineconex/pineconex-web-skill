@@ -2,9 +2,10 @@
 name: pineconex-api
 description: >-
   Drive a PineconeX account over its web API — create/validate Pine Script v6
-  strategies, run backtests, parameter sweeps and walk-forward analysis, launch
-  and monitor live trading bots, and fetch results. Use whenever the user wants
-  to operate PineconeX programmatically (not through the web UI) with an API key.
+  strategies, run backtests, parameter sweeps, robustness (permutation
+  significance) tests, launch and monitor live trading bots, and fetch results.
+  Use whenever the user wants to operate PineconeX programmatically (not through
+  the web UI) with an API key.
 ---
 
 # PineconeX Web API
@@ -77,8 +78,11 @@ launches) — back off before retrying.
    Terminal statuses: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`,
    `running`. Poll every few seconds; don't hammer.
 
-Sweeps (`/api/v1/jobs/sweep`) and walk-forward (`/api/v1/jobs/walk-forward`) follow the same
-launch → poll → results shape. See `references/api-reference.md` for their request fields.
+Sweeps (`/api/v1/jobs/sweep`) and robustness (`/api/v1/jobs/robustness`) follow the same
+launch → poll → results shape. Robustness runs a
+permutation (Monte Carlo significance) test — it returns a `p_value` on whether the strategy's
+edge is real price structure or luck (low = real), plus `hurst`/`variance_ratio` describing the
+instrument. See `references/api-reference.md` for their request fields.
 
 ## Core workflow: live bot
 
@@ -102,7 +106,7 @@ launch → poll → results shape. See `references/api-reference.md` for their r
 |---|---|
 | Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
 | Validate | `POST /api/v1/validate` |
-| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,walk-forward,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
+| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed}/status` |
 | Account | `GET/PATCH /api/v1/auth/me`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |

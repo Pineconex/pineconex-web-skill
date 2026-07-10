@@ -1,8 +1,8 @@
 # PineconeX API skill
 
 A skill that lets an AI assistant drive a [PineconeX](https://pineconex.com) account over its
-web API — create and validate Pine Script v6 strategies, run backtests / sweeps / walk-forward
-analysis, and launch and monitor live trading bots. Works with **Claude** and **ChatGPT**.
+web API — create and validate Pine Script v6 strategies, run backtests / sweeps / robustness
+tests, and launch and monitor live trading bots. Works with **Claude** and **ChatGPT**.
 
 First, get an API key: in the PineconeX web app go to **Account → API keys** and create a
 personal access token (it looks like `pcx_live_…` and is shown only once — copy it now).
