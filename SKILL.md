@@ -84,6 +84,32 @@ permutation (Monte Carlo significance) test — it returns a `p_value` on whethe
 edge is real price structure or luck (low = real), plus `hurst`/`variance_ratio` describing the
 instrument. See `references/api-reference.md` for their request fields.
 
+**The p-value trap — read this before running a significance test on a swept winner.**
+`/jobs/robustness` defaults to `search_mode: "fixed"`, which re-runs the strategy's *authored*
+input defaults on every permutation. That null — *"what this one rule scores on noise"* — is only
+valid if the parameters were chosen **without looking at the data**.
+
+If the parameters came from a sweep, `fixed` is optimistically biased: it cannot see that N
+candidates were tried, and the best of N noise draws is high by construction. So when a user asks
+you to sweep a strategy and then check whether the result is significant, pass the **same** search
+you actually ran:
+
+```
+POST /api/v1/jobs/robustness   { ..., "search_mode": "grid" }
+```
+
+It re-runs that optimizer inside every permutation, so the null becomes *"the best score this
+strategy family can be fitted to noise"*. Cost scales with it (`fixed` = 1 backtest per
+permutation, `grid` = the whole grid), and `permutations x search size` is capped — over the limit
+you get a 400 with the number.
+
+Two related things worth telling users:
+* **Out-of-sample needs no special mode** — it is a date range. Sweep on the training window, then
+  run this test on the unseen window with the parameters fixed. `fixed` is the *correct* null
+  there, because no search touched those bars.
+* **`perm_seed` on `/jobs/sweep`** runs a sweep against a permuted copy of the series, so a client
+  can build the same null itself by re-submitting one sweep under N seeds.
+
 ## Core workflow: live bot
 
 1. Confirm with the user (broker, symbol, paper vs. live).

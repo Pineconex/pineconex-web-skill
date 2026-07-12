@@ -90,13 +90,21 @@ Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`
 strategy_id           uuid    required
 symbol                string  required   (e.g. "AAPL")
 timeframe             string  required   ("1m","5m","15m","30m","60m","90m","1D","1W","1M"; case-sensitive: 1M=monthly, 1m=1min; 1H/1h alias→60m; other→400)
-from_date, to_date    date    required
+from_date, to_date    date    required   (TRADE GATE, not a data slice — see below)
 data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca")
 htf_timeframe         string  optional   (higher timeframe for request.security)
 htf_data_source       string  optional
 intrabar_timeframe    string  optional   (request.security_lower_tf)
 intrabar_data_source  string  optional
 ```
+
+**`from_date` / `to_date` gate TRADES, they do not slice the data.** The strategy is executed
+over the whole stored series so indicators warm up correctly (a 200-bar EMA is already
+converged on the first tradeable bar), but entries are only taken inside
+`[from_date, to_date]`, and an open position is force-closed at `to_date`
+(exit reason `DateRangeEnd`). So widening the range changes which trades happen; it does not
+change how the indicators are computed. This is the same contract for backtest, sweep,
+robustness and stress.
 
 ### POST /api/v1/jobs/backtest
 Above fields, plus:
@@ -107,23 +115,57 @@ params_override  object  optional   { var_name: number|bool }  (strings rejected
 ### POST /api/v1/jobs/sweep
 Above common fields, plus:
 ```
-mode      "grid"|"random"|"bayesian"|"monte_carlo"|"rbf"   required
-trials    int   optional   (random/bayesian)
-restarts  int   optional   (monte_carlo)
-steps     int   optional   (monte_carlo)
-kappa     float optional   (bayesian UCB exploration)
+mode        "grid"|"random"|"bayesian"|"monte_carlo"|"rbf"   required
+trials      int   optional   (random/bayesian)
+restarts    int   optional   (monte_carlo)
+steps       int   optional   (monte_carlo)
+kappa       float optional   (bayesian UCB exploration)
+perm_seed   int   optional   (sweep a bar-PERMUTED copy of the series instead of the
+                              real bars — see below)
+perm_block  int   optional   (default 1; 1..1000. Permutation block size in bars.
+                              Ignored unless perm_seed is set)
 ```
 Which `input.*` vars are swept comes from the strategy (`GET .../inputs`, `swept: true`).
+A 1-axis grid is valid — the cartesian product of a single axis is that axis.
+
+**`perm_seed` — building a null distribution.** With `perm_seed` set, the sweep runs against a
+bar-permuted copy of the primary series. A permutation is fully determined by its seed, so
+re-submitting the *same* sweep under N different seeds gives you N independent nulls of the
+**best-of-search** score. No bars cross the wire — the runner already holds the Parquet and
+shuffles it in memory.
+
+That is an in-sample Monte Carlo permutation test, and it is the correction for data-mining bias:
+because the optimizer runs inside every permutation, the null becomes *"the best score this
+strategy family can be fitted to noise"*, rather than *"what one fixed rule scores on noise"*.
+
+```
+observed = sweep(...)                       # best-of-search on the real bars
+null[i]  = sweep(..., perm_seed=i)          # best-of-search on permutation i
+p        = (#{null >= observed} + 1) / (N + 1)
+```
+Both sides must be best-of-search: comparing a single fixed-parameter run against a null of maxima
+drives the p-value toward 1 (wrong in the opposite direction).
+
+Rejected with 400 if combined with `intrabar_timeframe` — sub-bar structure cannot be synthesized
+from permuted bars, so intra-bar fills would price against a path that does not exist. The HTF, if
+present, is re-derived by aggregating the permuted primary so the two series stay coherent.
 
 ### POST /api/v1/jobs/robustness
 Permutation (Monte Carlo significance) test: bar-permutes the price series N times,
 re-runs the strategy on each, and reports a p-value on whether the edge is real
-structure or luck. Runs the strategy with its authored input defaults (no sweep).
+structure or luck.
 Above common fields, plus:
 ```
 permutations  int     optional  (default 200; 1..2000 — the null-distribution size)
 metric        string  optional  ("net_pnl_pct"(default)|"profit_factor"|"win_rate";
                                   the statistic the p-value is computed on)
+search_mode   string  optional  ("fixed"(default)|"grid"|"random"|"bayesian"|
+                                  "monte_carlo"|"rbf" — the SELECTION PROCEDURE re-run
+                                  inside every permutation. See below: this is the null
+                                  hypothesis itself, and the default is only correct if
+                                  the parameters were NOT found by a sweep)
+search_trials int     optional  (candidates per permutation for random/bayesian/rbf.
+                                  Ignored by fixed and grid)
 block_size    int     optional  (default 1; 1..1000. 1 = single-bar permutation
                                   (destroys all serial structure); >1 = block
                                   permutation (shuffle N-bar chunks, preserving
@@ -134,6 +176,26 @@ seed          int     optional  (RNG seed; omit for a time-seeded run. The effec
 Results (`GET .../results`) include: `p_value`, `observed_stat`, the `null_dist` array
 (+ mean/sd/percentiles), `hurst` + `variance_ratio` (structure of the price series,
 strategy-independent), and the echoed `permutations`/`block_size`/`metric`/`seed`.
+
+**`search_mode` — what the null actually is.** `fixed` (the default) re-runs the strategy's
+authored input defaults on every permutation: one backtest each. Its null is *"what this one rule
+scores on noise"*, which is correct **only if the parameters were chosen without looking at the
+data**.
+
+If you swept the parameters and used the winner, `fixed` is optimistically biased — it cannot see
+that N candidates were tried, and the maximum of N noise draws is large by construction. Declare
+the search you actually used instead, and it is re-run inside every permutation, so the null
+becomes *"the best score this strategy family can be fitted to noise"*. Optimize with Bayesian,
+test with Bayesian.
+
+Cost scales with the mode: `fixed` = 1 backtest per permutation, `grid` = the whole grid,
+`random`/`bayesian`/`rbf` = `search_trials`. `permutations x search size` is capped; over the limit
+you get a 400 with the actual number. That price is intrinsic — it is proportional to the very
+selection bias it removes.
+
+**Out-of-sample.** There is no separate mode: hold data back with the date range. Sweep on the
+training window, then run this test on the unseen window with the parameters fixed — `fixed` is the
+*correct* null there, because no search ever touched those bars.
 
 ### POST /api/v1/jobs/live — **Pro plan or higher** (free-plan keys get `403`)
 ```
