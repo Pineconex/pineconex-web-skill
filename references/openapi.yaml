@@ -246,9 +246,10 @@ paths:
       tags: [Jobs]
       summary: Launch a permutation (Monte Carlo significance) test.
       description: >-
-        Bar-permutes the price series N times, re-runs the strategy on each (with its
-        authored input defaults), and reports a p-value on whether the edge is real
-        structure or luck. Available on all plans.
+        Requires a Premium plan or higher (403 otherwise). Bar-permutes the price series N
+        times, re-runs the SELECTION PROCEDURE on each (see search_mode), and reports a
+        p-value on whether the edge is real structure or luck. Requires the strategy to have
+        //@sweep parameters (400 otherwise) — for every search_mode, including fixed.
       requestBody:
         required: true
         content:
@@ -260,6 +261,33 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+
+  /api/v1/jobs/stress:
+    post:
+      operationId: launchStress
+      tags: [Jobs]
+      summary: Launch a synthetic-market stress test.
+      description: >-
+        Requires a Premium plan or higher (403 otherwise). Calibrates an Ornstein-Uhlenbeck +
+        Poisson-jump process on the real series, then re-runs ONE fixed config across a grid of
+        (mean-reversion half-life x jump intensity) cells with several simulated paths each, and
+        reports where the strategy survives. It is NOT an optimizer and NOT a significance test:
+        it runs no search and its market is synthetic. It answers "where does this config break?",
+        not "is this edge real?". Pass params_override with the config you actually deploy —
+        without it you are mapping the envelope of the .pine defaults, not of what you trade.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StressRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403":
+          description: Plan does not permit validation jobs (requires Premium or higher).
 
   /api/v1/jobs/live:
     post:
@@ -616,11 +644,10 @@ components:
         - type: object
           required: [mode]
           properties:
-            mode: { type: string, enum: [grid, random, bayesian, monte_carlo, rbf] }
-            trials: { type: integer, nullable: true }
-            restarts: { type: integer, nullable: true }
-            steps: { type: integer, nullable: true }
-            kappa: { type: number, nullable: true }
+            mode: { type: string, enum: [grid, random, rbf], description: "bayesian and monte_carlo were REMOVED 2026-07-13 (both failed a blind-random control at equal budget: monte_carlo scored worse than random, bayesian tied it). Sending either now returns 400." }
+            trials: { type: integer, nullable: true, description: "Evaluations for random/rbf (rbf calls it the budget). Grid derives its count from minval/maxval/step." }
+            metric: { type: string, enum: [net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate, max_dd_pct], default: net_pnl_pct, description: "The objective the search hill-climbs. ONLY rbf steers — grid enumerates every cell and random samples blindly, so both ignore it (not an error, just no effect). max_dd_pct is minimised. Requires the strategy to have //@sweep params (400 otherwise)." }
+            min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never win — not in the search, not in the results ranking. 0..1000; 0 disables. This is what makes the non-PnL objectives safe: profit factor of a config that never trades is +inf (no losses) and win rate of one lucky trade is 100%, so with no floor a PF or win-rate search converges on a strategy that refuses to trade." }
             perm_seed: { type: integer, nullable: true, description: "Sweep a bar-PERMUTED copy of the series instead of the real bars. A permutation is fully determined by its seed, so re-submitting the same sweep under N seeds builds a null distribution of the best-of-search score — an in-sample Monte Carlo permutation test. No bars cross the wire. Rejected (400) with intrabar_timeframe." }
             perm_block: { type: integer, default: 1, description: "Permutation block size in bars (1..1000). 1 = single-bar. Ignored unless perm_seed is set." }
     RobustnessRequest:
@@ -629,11 +656,28 @@ components:
         - type: object
           properties:
             permutations: { type: integer, default: 200, description: Null-distribution size (1..2000). }
-            metric: { type: string, enum: [net_pnl_pct, profit_factor, win_rate], default: net_pnl_pct, description: Statistic the p-value is computed on. }
+            metric: { type: string, enum: [net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate], default: net_pnl_pct, description: "BOTH the statistic the p-value is computed on AND the objective the search hill-climbs inside every permutation — deliberately the same value. An MCPT is only valid when the procedure re-run on permuted bars IS the procedure that ran on the real bars, so a search optimising net PnL while the test reported win rate would be a different procedure and its null would not describe it. Set it to whatever your sweep optimised. max_dd_pct is NOT accepted (400): every statistic here is higher-is-better, which is what makes the one-sided upper tail correct." }
+            min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never be the winner the statistic is read from — applied identically to the real run and to every permutation. 0..1000. With no floor a strategy that takes ZERO trades is a valid winner: its statistic is 0, every shuffled series also scores 0, and the test returns p = 1.0000 about a strategy that never traded." }
             block_size: { type: integer, default: 1, description: "1 = single-bar permutation (destroys all serial structure); >1 = block permutation (shuffle N-bar chunks, preserving shorter structure). Range 1..1000." }
             seed: { type: integer, nullable: true, description: RNG seed; omit for time-seeded. Effective seed is echoed in results. }
-            search_mode: { type: string, enum: [fixed, grid, random, bayesian, monte_carlo, rbf], default: fixed, description: "The selection procedure re-run inside every permutation — this IS the null hypothesis. 'fixed' re-runs the strategy's authored input defaults (one backtest per permutation) and is correct ONLY if the parameters were chosen without looking at the data. If they came from a sweep, 'fixed' is optimistically biased: it cannot see that N candidates were tried, and the best of N noise draws is high by construction. Declare the search you actually used and it is re-run inside every permutation, so the null becomes 'the best score this strategy family can be fitted to noise'. Cost scales with it; permutations x search size is capped (400 over the limit)." }
+            search_mode: { type: string, enum: [fixed, grid, random, rbf], default: fixed, description: "The selection procedure re-run inside every permutation — this IS the null hypothesis. 'fixed' re-runs the strategy's authored input defaults (one backtest per permutation) and is correct ONLY if the parameters were chosen without looking at the data. If they came from a sweep, 'fixed' is optimistically biased: it cannot see that N candidates were tried, and the best of N noise draws is high by construction. Declare the search you actually used and it is re-run inside every permutation, so the null becomes 'the best score this strategy family can be fitted to noise'. Cost scales with it; permutations x search size is capped (400 over the limit)." }
             search_trials: { type: integer, nullable: true, description: "Candidates per permutation for random/bayesian/rbf. Ignored by fixed and grid." }
+    StressRequest:
+      allOf:
+        - $ref: "#/components/schemas/CommonJobRequest"
+        - type: object
+          properties:
+            model: { type: string, enum: [ou_jump], default: ou_jump, description: Synthetic market generator. }
+            half_lives: { type: array, items: { type: number }, description: "X axis: mean-reversion half-lives in bars. Max 12 values. The instrument's own calibrated coordinate is forced onto the grid, so a run is usually one row/column larger than what you pass." }
+            jump_rates: { type: array, items: { type: number }, description: "Y axis: jumps per 1000 bars. Max 12 values." }
+            paths: { type: integer, default: 20, description: Simulated paths per cell (1..100). }
+            jump_sigma: { type: number, description: "0..50" }
+            vol_mult: { type: number, description: "0.1..10" }
+            bars: { type: integer, description: Bars per synthetic path (100..5000). }
+            metric: { type: string, description: The statistic each cell is scored on. }
+            seed: { type: integer, nullable: true }
+            params_override: { type: object, additionalProperties: true, nullable: true, description: "The config to stress, keyed by input VARIABLE name (not title). Numbers and bools only — strings are rejected (code-injection guard). Send the same override you use for /jobs/backtest and /jobs/live: stress runs one fixed parameter set across every synthetic market, so it should be the set you actually deploy. Unlike sweep and robustness, which deliberately ignore it." }
+
     LiveRequest:
       type: object
       required: [strategy_id, symbol, timeframe]
@@ -654,7 +698,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         strategy_id: { type: string, format: uuid, nullable: true }
-        job_type: { type: string, enum: [backtest, sweep, robustness, live] }
+        job_type: { type: string, enum: [backtest, sweep, robustness, stress, live] }
         status: { type: string, enum: [pending, running, completed, failed, cancelled, timeout] }
         container_id: { type: string, nullable: true }
         config: { type: object, additionalProperties: true }

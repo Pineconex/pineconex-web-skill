@@ -78,11 +78,28 @@ launches) — back off before retrying.
    Terminal statuses: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`,
    `running`. Poll every few seconds; don't hammer.
 
-Sweeps (`/api/v1/jobs/sweep`) and robustness (`/api/v1/jobs/robustness`) follow the same
-launch → poll → results shape. Robustness runs a
+Sweeps (`/api/v1/jobs/sweep`), robustness (`/api/v1/jobs/robustness`) and stress
+(`/api/v1/jobs/stress`) follow the same launch → poll → results shape. Robustness runs a
 permutation (Monte Carlo significance) test — it returns a `p_value` on whether the strategy's
 edge is real price structure or luck (low = real), plus `hurst`/`variance_ratio` describing the
-instrument. See `references/api-reference.md` for their request fields.
+instrument. Stress maps where a config *breaks* across synthetic markets — it is neither an
+optimizer nor a significance test. Robustness and stress require a **Premium** plan.
+See `references/api-reference.md` for their request fields.
+
+**Sweep modes are `grid`, `random`, `rbf`.** `bayesian` and `monte_carlo` were removed 2026-07-13
+after failing a blind-random control at equal budget (monte_carlo scored *worse* than random;
+bayesian tied it exactly). Only `rbf` steers, so only `rbf` reads `metric` — grid enumerates every
+cell and random samples blindly regardless of the objective.
+
+**Two settings users will not think to ask for, and should:**
+* **`metric`** — the objective. Defaults to `net_pnl_pct`, which will happily buy return with
+  drawdown. `return_over_dd` and `sharpe` are the risk-adjusted ones. If a user says they care
+  about drawdown or consistency, set it.
+* **`min_trades`** (default 5) — a trial with fewer trades can never win. Do **not** set it to 0
+  with `profit_factor` or `win_rate`: a config that never trades has no losses, so its profit
+  factor is `+inf`, and the search will converge on a strategy that refuses to trade.
+
+**Both endpoints 400 if the strategy has no `//@sweep` parameters.** There is nothing to search.
 
 **The p-value trap — read this before running a significance test on a swept winner.**
 `/jobs/robustness` defaults to `search_mode: "fixed"`, which re-runs the strategy's *authored*
@@ -92,11 +109,15 @@ valid if the parameters were chosen **without looking at the data**.
 If the parameters came from a sweep, `fixed` is optimistically biased: it cannot see that N
 candidates were tried, and the best of N noise draws is high by construction. So when a user asks
 you to sweep a strategy and then check whether the result is significant, pass the **same** search
-you actually ran:
+you actually ran — and the **same** `metric`:
 
 ```
-POST /api/v1/jobs/robustness   { ..., "search_mode": "grid" }
+POST /api/v1/jobs/robustness   { ..., "search_mode": "rbf", "metric": "sharpe" }
 ```
+
+On robustness, `metric` is both the reported statistic **and** the objective the search hill-climbs
+inside every permutation. That is deliberate: the null is only valid if the procedure re-run on the
+permuted bars is the procedure you ran on the real bars. Set it to whatever your sweep optimised.
 
 It re-runs that optimizer inside every permutation, so the null becomes *"the best score this
 strategy family can be fitted to noise"*. Cost scales with it (`fixed` = 1 backtest per
@@ -132,7 +153,7 @@ Two related things worth telling users:
 |---|---|
 | Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
 | Validate | `POST /api/v1/validate` |
-| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
+| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed}/status` |
 | Account | `GET/PATCH /api/v1/auth/me`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
