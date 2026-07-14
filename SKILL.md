@@ -135,7 +135,9 @@ Two related things worth telling users:
 
 1. Confirm with the user (broker, symbol, paper vs. live).
 2. Ensure the broker is connected: `auth "$PINECONEX_API_URL/api/v1/alpaca/status"` (or `saxo`,
-   `ibkr`, `lightspeed`). If not connected, the user must connect it in the web UI (OAuth).
+   `ibkr`, `lightspeed`, `bitstamp`). If not connected, the user must connect it in the web UI
+   (OAuth) — except **Bitstamp**, which takes an API key and can be connected over the API
+   (`POST /api/v1/bitstamp/credentials`).
 3. Launch:
    ```bash
    auth -X POST "$PINECONEX_API_URL/api/v1/jobs/live" \
@@ -147,6 +149,31 @@ Two related things worth telling users:
 4. Monitor: `GET /api/v1/jobs/<id>` for status, `GET /api/v1/jobs/<id>/logs` (SSE — stream it with the
    `Authorization: Bearer` header, e.g. `curl -N`). Stop with `DELETE /api/v1/jobs/<id>`.
 
+## Crypto and Bitstamp
+
+Crypto is tradeable on **Alpaca** (~29 USD pairs) and **Bitstamp** (~130 USD + ~126 EUR pairs),
+and backtestable from `yahoo`, `alpaca`, or `bitstamp`. Symbols live under `index_name`
+`"Crypto (USD)"` / `"Crypto (EUR)"` and are addressed by `tv_symbol` (`BTCUSD`, `ETHEUR`) —
+the API maps that to each venue's own name, so never hand-build `BTC/USD` or `btcusd`.
+
+**Three things worth telling a user before they launch a crypto bot, because Pine hides them:**
+
+* **A Bitstamp stop-loss is not a broker order.** Bitstamp spot has *no* native stop, TP, or OCO
+  — it accepts `stop_price`, answers `200 OK` with an order id, and creates **nothing**. So
+  `strategy.exit`'s stop on Bitstamp is **synthetic**: the bot checks it at bar close, on a 24/7
+  market. A gap through the stop while the bot is between bars is not protected against. Never
+  tell a user their Bitstamp bot "has a stop at the broker" — it does not.
+* **Alpaca crypto rests one exit, and it is the stop.** Crypto refuses OCO, and the first resting
+  exit reserves the whole coin balance, so the take-profit is bot-managed (bar-close, then cancel
+  the stop and market-close). Alpaca *equity* gets a real broker-side OCO; the two behave
+  differently on the same broker.
+* **Bitstamp is spot: long-only.** A short entry is refused. And a bot will refuse to adopt coins
+  it cannot price (deposited coins have no purchase price in the API) — fund by **buying**.
+
+For historical data, prefer **`bitstamp`** for anything intraday and older than ~2 years: Yahoo
+refuses intraday beyond 730 days and Alpaca's crypto history starts in 2021, while Bitstamp's
+public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
+
 ## Endpoint catalog
 
 | Area | Endpoints |
@@ -155,7 +182,7 @@ Two related things worth telling users:
 | Validate | `POST /api/v1/validate` |
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
-| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed}/status` |
+| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp}/status`, `POST /api/v1/bitstamp/credentials`, `DELETE /api/v1/bitstamp/disconnect` |
 | Account | `GET/PATCH /api/v1/auth/me`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
 
 Full request/response field shapes: **`references/api-reference.md`** (read it when you need

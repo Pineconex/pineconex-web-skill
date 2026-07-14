@@ -457,6 +457,47 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+  /api/v1/bitstamp/status:
+    get:
+      operationId: bitstampStatus
+      tags: [Brokers]
+      summary: Bitstamp connection status.
+      description: >-
+        Returns { connected, env, account }. `env` is "sandbox" (demo funds — this venue's only
+        paper mode) or "live" (real money); it is fixed at connect time, not per bot launch.
+        `account` lists the funded currencies (Bitstamp has no account number).
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/bitstamp/credentials:
+    post:
+      operationId: bitstampConnect
+      tags: [Brokers]
+      summary: Connect a Bitstamp account (API key + secret).
+      description: >-
+        Bitstamp is the one broker connectable over the API — the others are OAuth and must be
+        connected in the web UI. The key is verified against Bitstamp before it is stored and
+        must carry the "View your transactions" permission (Bitstamp's order status has no fill
+        price, so transactions are the only place a bot can learn what it paid). Both key and
+        secret are secret: on Bitstamp the key itself is the identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BitstampCredentials" }
+      responses:
+        "204": { description: Connected. }
+        "400": { description: Bitstamp rejected the credentials, or the key lacks transactions permission. }
+  /api/v1/bitstamp/disconnect:
+    delete:
+      operationId: bitstampDisconnect
+      tags: [Brokers]
+      summary: Disconnect the Bitstamp account.
+      responses:
+        "204": { description: Disconnected. }
 
   /api/v1/auth/me:
     get:
@@ -623,7 +664,17 @@ components:
         timeframe: { type: string, example: "1D", description: "1D, 1H, 15m, 5m, 1m, 1W, 1M" }
         from_date: { type: string, format: date }
         to_date: { type: string, format: date }
-        data_source: { type: string, example: yahoo, description: "yahoo, saxo, massive, ibkr, alpaca" }
+        data_source:
+          type: string
+          example: yahoo
+          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp]
+          description: >-
+            A source only serves symbols it has a ticker for (see the Symbol schema); a null
+            ticker is a 400. yahoo: equities + crypto, no account, but NO intraday older than
+            730 days. saxo: EU/US equities (needs saxo_uic — crypto has none). alpaca: US
+            equities + ~29 USD crypto pairs, crypto history starts 2021-01-01. bitstamp:
+            crypto (USD + EUR) — no account needed, timeframes 1m/5m/15m/30m/60m/1D, and the
+            ONLY source for deep intraday crypto history (public series back to 2011).
         htf_timeframe: { type: string, nullable: true }
         htf_data_source: { type: string, nullable: true }
         intrabar_timeframe: { type: string, nullable: true }
@@ -690,8 +741,19 @@ components:
         heartbeat_secs: { type: integer, nullable: true }
         auto_restart: { type: boolean, default: false }
         params_override: { $ref: "#/components/schemas/ParamsOverride" }
-        broker: { type: string, enum: [saxo, alpaca, ibkr, lightspeed], default: saxo }
-        saxo_env: { type: string, enum: [sim, live], nullable: true }
+        broker:
+          type: string
+          enum: [saxo, alpaca, ibkr, lightspeed, bitstamp]
+          default: saxo
+          description: >-
+            The broker changes what protective orders exist. saxo and alpaca (equity) place a
+            native OCO (resting stop + take-profit, linked). alpaca CRYPTO can rest only ONE
+            exit — the stop — so its take-profit is bot-managed at bar close. bitstamp is SPOT
+            and has NO native stop/TP/OCO at all: it accepts stop_price, answers 200 OK with an
+            order id, and creates nothing, so every Bitstamp stop is SYNTHETIC (bot-side, bar
+            close, on a 24/7 market) and spot is long-only. lightspeed and ibkr send market
+            orders only — nothing rests, nothing protects.
+        saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's env is fixed when its credentials are saved." }
         webhook_url: { type: string, nullable: true, description: http/https endpoint for order/trade/fill events. }
     Job:
       type: object
@@ -710,15 +772,33 @@ components:
         error_message: { type: string, nullable: true }
     Symbol:
       type: object
+      description: >-
+        Always address a symbol by tv_symbol (AAPL, BTCUSD, ETHEUR) — the API maps it to each
+        source's and broker's own name. The per-venue tickers below are NOT interchangeable
+        (BTC-USD on Yahoo, BTC/USD on Alpaca, btcusd on Bitstamp) and are exposed only so a
+        client can tell which sources/brokers carry the symbol: a null ticker means that venue
+        cannot serve it. Crypto sits under index_name "Crypto (USD)" / "Crypto (EUR)".
       properties:
         id: { type: string, format: uuid }
-        tv_symbol: { type: string }
+        tv_symbol: { type: string, example: BTCUSD }
         display_name: { type: string }
-        index_name: { type: string }
-        yahoo_ticker: { type: string, nullable: true }
+        index_name: { type: string, example: Crypto (USD) }
+        yahoo_ticker: { type: string, nullable: true, example: BTC-USD }
         massive_ticker: { type: string, nullable: true }
         ibkr_symbol: { type: string, nullable: true }
-        alpaca_us_symbol: { type: string, nullable: true }
+        alpaca_us_symbol: { type: string, nullable: true, example: BTC/USD }
+        saxo_uic: { type: integer, nullable: true, description: Null for crypto — Saxo cannot serve it. }
+        bitstamp_pair: { type: string, nullable: true, example: btcusd }
+    BitstampCredentials:
+      type: object
+      required: [api_key, api_secret, env]
+      properties:
+        api_key: { type: string }
+        api_secret: { type: string }
+        env:
+          type: string
+          enum: [sandbox, live]
+          description: sandbox = demo funds (this venue's only paper mode). live = REAL MONEY.
     CatalogEntry:
       type: object
       properties:

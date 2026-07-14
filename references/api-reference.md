@@ -91,7 +91,9 @@ strategy_id           uuid    required
 symbol                string  required   (e.g. "AAPL")
 timeframe             string  required   ("1m","5m","15m","30m","60m","90m","1D","1W","1M"; case-sensitive: 1M=monthly, 1m=1min; 1H/1h alias→60m; other→400)
 from_date, to_date    date    required   (TRADE GATE, not a data slice — see below)
-data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca")
+data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca","bitstamp"
+                                          — see Data sources below; not every source carries
+                                          every symbol)
 htf_timeframe         string  optional   (higher timeframe for request.security)
 htf_data_source       string  optional
 intrabar_timeframe    string  optional   (request.security_lower_tf)
@@ -293,10 +295,32 @@ execute_orders   bool    optional  (default true)
 heartbeat_secs   int     optional
 auto_restart     bool    optional  (default false)
 params_override  object  optional  { var_name: number|bool }
-broker           string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed")
+broker           string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp")
 saxo_env         string  optional  ("sim"|"live"; Saxo only)
 webhook_url      string  optional  (http/https; receives order/trade/fill events)
 ```
+
+**The broker is not a detail — it changes what protective orders exist.** Pine is the same on
+every venue; the order model underneath is not, and the difference is not guessable:
+
+| Broker | Instruments | Stop-loss / take-profit |
+|---|---|---|
+| **Saxo** | EU + US equities | Native **OCO** at the broker: a resting stop *and* a resting TP, linked (a fill on one cancels the other). `saxo_env` picks sim (paper) or live. |
+| **Alpaca** (equity) | US equities | Native **OCO**, same as Saxo. Margin accounts can short. |
+| **Alpaca** (crypto) | ~29 USD pairs (`BTCUSD`, `ETHUSD`, …) | Only **one** exit can rest, and it is the **stop** — crypto refuses `oco`/`bracket`, and the first resting exit reserves the whole coin balance. The take-profit is therefore **bot-managed**: evaluated at bar close, and on a hit the bot cancels the stop and market-closes. Fractional size; fees are taken in the coin. |
+| **Bitstamp** (spot) | ~130 USD + ~126 EUR pairs | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
+| **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
+| **IBKR** | US equities | Market orders only. |
+
+Bitstamp has **no `env` field on the launch request** — the environment (`sandbox` = the venue's
+only paper mode, or `live` = real money) is fixed when the credentials are saved. Check it with
+`GET /api/v1/bitstamp/status` before launching.
+
+A Bitstamp bot also **refuses to adopt coins it cannot price**. A spot balance is not a position
+and Bitstamp stores no average entry price, so the bot reconstructs a cost basis from your fill
+history — and a coin that was *deposited* (or bought outside the API's 30-day transaction window)
+has no purchase price anywhere. Rather than invent one, the bot logs that it cannot price the
+holding and stays flat. Fund a Bitstamp bot's account by **buying** the coin, not depositing it.
 
 ### GET /api/v1/jobs — list (recent) → array of `JobResponse`
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
@@ -325,11 +349,37 @@ token, since browser `EventSource` can't set headers).
 
 ## Data
 
+### Data sources
+
+A source can only serve a symbol it has a ticker for — the per-symbol tickers on
+`GET /api/v1/data/symbols` are the authority, and a source whose ticker is `null` returns `400`.
+
+| `data_source` | Coverage | Notes |
+|---|---|---|
+| `yahoo` | Equities + crypto | Default, no account needed. **Refuses any intraday range older than 730 days.** |
+| `saxo` | EU + US equities | Needs a connected Saxo account. `saxo_uic` must be non-null (crypto has none). |
+| `alpaca` | US equities + ~29 USD crypto pairs | Needs a connected Alpaca account. Crypto history **starts 2021-01-01**. |
+| `massive` | Broad market data | — |
+| `ibkr` | Equities | Needs IBKR configured (TWS/Gateway). |
+| `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
+
+**Use `bitstamp` for deep intraday crypto history.** It is the only source that reaches it:
+Yahoo cuts intraday off at 730 days and Alpaca's crypto data begins in 2021, while Bitstamp's
+public series goes back to **2011** and quotes real BTC/USD (not USDT). A multi-year hourly
+Bitcoin backtest — the window the MCPT literature uses — is only reproducible from this source.
+
 ### GET /api/v1/data/symbols → array
 ```
 id, tv_symbol, display_name, index_name,
-yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null
+yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null,
+saxo_uic|null, bitstamp_pair|null
 ```
+Crypto lives under `index_name` **"Crypto (USD)"** / **"Crypto (EUR)"**; `tv_symbol` is the
+pairless form (`BTCUSD`, `ETHEUR`). The per-broker tickers differ and are **not**
+interchangeable — `BTC-USD` (Yahoo) vs `BTC/USD` (Alpaca) vs `btcusd` (Bitstamp) — but you
+never send those: address everything by `tv_symbol` and the API maps it per source and per
+broker. A symbol whose `alpaca_us_symbol` is null cannot be traded on Alpaca (most EUR pairs),
+and one whose `bitstamp_pair` is null cannot be traded on Bitstamp.
 
 ### GET /api/v1/data/catalog → array of cached OHLCV datasets
 ```
@@ -349,9 +399,33 @@ Response: the resulting catalog entry.
 
 ---
 
-## Brokers (status only via API; connect/OAuth is web-UI only)
+## Brokers
 
-`GET /api/v1/alpaca/status` · `GET /api/v1/saxo/status` · `GET /api/v1/ibkr/status` · `GET /api/v1/lightspeed/status`
+`GET /api/v1/alpaca/status` · `GET /api/v1/saxo/status` · `GET /api/v1/ibkr/status` ·
+`GET /api/v1/lightspeed/status` · `GET /api/v1/bitstamp/status`
+
+Connecting a broker is **web-UI only** for the OAuth brokers (Saxo, Alpaca OAuth) — there is no
+API path to complete a redirect flow.
+
+**Bitstamp** authenticates with an API key + secret, so it can be connected over the API:
+
+### POST /api/v1/bitstamp/credentials → `204`
+```
+api_key     string  required
+api_secret  string  required
+env         string  required  ("sandbox" = demo funds, the venue's only paper mode
+                               | "live" = REAL MONEY)
+```
+Both halves are verified against Bitstamp before they are stored, and both are secret — on
+Bitstamp the *key* is the identity, unlike Alpaca where the key id is public. The key must
+carry the **"View your transactions"** permission: Bitstamp's order status has no fill price,
+so transactions are the only place a bot can learn what it paid. A key without it is rejected
+at connect rather than mid-trade.
+
+### DELETE /api/v1/bitstamp/disconnect → `204`
+
+`GET /api/v1/bitstamp/status` → `{ connected, env, account }`, where `account` lists the funded
+currencies (Bitstamp has no account number).
 
 ---
 
