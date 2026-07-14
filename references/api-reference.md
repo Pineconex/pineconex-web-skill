@@ -285,7 +285,10 @@ Results (`GET .../results`): `calibration` (`phi`, `theta`, `half_life_bars`, `s
 `jumps_per_1k`, `n_bars`) and `cells[]`, each with `half_life_bars`, `jumps_per_1k`, `median`,
 `p25`, `p75`, `mean`, `min`, `max`, `frac_profitable`, `median_trades`.
 
-### POST /api/v1/jobs/live — **Pro plan or higher** (free-plan keys get `403`)
+### POST /api/v1/jobs/live — available on **every plan** (free included)
+Live trading is not plan-gated. What a tier buys is *capacity* — live bots draw on the same
+concurrent-job quota as everything else (free 1, higher tiers more), so a `403` here means the
+quota is full, not that the plan is too low.
 ```
 strategy_id      uuid    required
 symbol           string  required
@@ -307,8 +310,8 @@ every venue; the order model underneath is not, and the difference is not guessa
 |---|---|---|
 | **Saxo** | EU + US equities | Native **OCO** at the broker: a resting stop *and* a resting TP, linked (a fill on one cancels the other). `saxo_env` picks sim (paper) or live. |
 | **Alpaca** (equity) | US equities | Native **OCO**, same as Saxo. Margin accounts can short. |
-| **Alpaca** (crypto) | ~29 USD pairs (`BTCUSD`, `ETHUSD`, …) | Only **one** exit can rest, and it is the **stop** — crypto refuses `oco`/`bracket`, and the first resting exit reserves the whole coin balance. The take-profit is therefore **bot-managed**: evaluated at bar close, and on a hit the bot cancels the stop and market-closes. Fractional size; fees are taken in the coin. |
-| **Bitstamp** (spot) | ~130 USD + ~126 EUR pairs | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
+| **Alpaca** (crypto) | US-dollar pairs only (`BTCUSD`, `ETHUSD`, …; a symbol is tradeable here iff its `alpaca_us_symbol` is non-null) | Only **one** exit can rest, and it is the **stop** — crypto refuses `oco`/`bracket`, and the first resting exit reserves the whole coin balance. The take-profit is therefore **bot-managed**: evaluated at bar close, and on a hit the bot cancels the stop and market-closes. Fractional size; fees are taken in the coin. |
+| **Bitstamp** (spot) | USD + EUR spot pairs (iff `bitstamp_pair` is non-null) | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
 
@@ -358,7 +361,7 @@ A source can only serve a symbol it has a ticker for — the per-symbol tickers 
 |---|---|---|
 | `yahoo` | Equities + crypto | Default, no account needed. **Refuses any intraday range older than 730 days.** |
 | `saxo` | EU + US equities | Needs a connected Saxo account. `saxo_uic` must be non-null (crypto has none). |
-| `alpaca` | US equities + ~29 USD crypto pairs | Needs a connected Alpaca account. Crypto history **starts 2021-01-01**. |
+| `alpaca` | US equities + US-dollar crypto pairs | Needs a connected Alpaca account. Crypto history **starts 2021-01-01**. |
 | `massive` | Broad market data | — |
 | `ibkr` | Equities | Needs IBKR configured (TWS/Gateway). |
 | `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
@@ -448,9 +451,11 @@ Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key`
 - **Rate limits (per user, `429`):** validation ≈ 20/min, job launches ≈ 30/min. On `429`, back off
   and retry later — don't loop.
 - **Plan quotas (`403`):** concurrent running jobs and total strategies are capped by plan.
-- **Pro-gated features (`403`):** live trading (`POST /jobs/live`) requires a Pro plan or
-  higher; free-plan keys are rejected. Backtest, sweep, and robustness are available on all
-  plans (subject to the concurrent-job quota above).
+- **Plan-gated features (`403`):** only **robustness** (`POST /jobs/robustness`) and **stress**
+  (`POST /jobs/stress`) require a plan — **Premium** or higher. They are also the two most
+  expensive job types (a permutation test is N full backtests), so the gate doubles as a cost
+  control. Backtest, sweep and **live trading are open to every plan, free included** — a `403`
+  on `/jobs/live` is the concurrent-job quota, not the tier.
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
 - **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.
 - **Errors** are `{ "error": string }` with the HTTP status; `401` = missing/invalid/expired key.

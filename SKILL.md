@@ -32,9 +32,10 @@ auth "$PINECONEX_API_URL/api/v1/strategies"
 
 If a call returns **401** the key is missing/invalid/revoked/expired — ask the user to mint a
 fresh one. **403** means either a plan quota (concurrent jobs/strategies) was hit, or the endpoint
-requires a higher plan — notably live trading (`POST /api/v1/jobs/live`) needs a **Pro plan or
-higher**, so a free-plan key is rejected. **429** means a per-user rate limit (validation or job
-launches) — back off before retrying.
+requires a higher plan — the only plan-gated endpoints are **robustness** and **stress**, which
+need **Premium**. Backtest, sweep and **live trading are available on every plan**, including
+free; what the tier buys is capacity (concurrent jobs), not access. **429** means a per-user rate
+limit (validation or job launches) — back off before retrying.
 
 ## Guardrails — read before acting
 
@@ -151,7 +152,7 @@ Two related things worth telling users:
 
 ## Crypto and Bitstamp
 
-Crypto is tradeable on **Alpaca** (~29 USD pairs) and **Bitstamp** (~130 USD + ~126 EUR pairs),
+Crypto is tradeable on **Bitstamp** (USD + EUR spot pairs) and **Alpaca** (US-dollar pairs only),
 and backtestable from `yahoo`, `alpaca`, or `bitstamp`. Symbols live under `index_name`
 `"Crypto (USD)"` / `"Crypto (EUR)"` and are addressed by `tv_symbol` (`BTCUSD`, `ETHEUR`) —
 the API maps that to each venue's own name, so never hand-build `BTC/USD` or `btcusd`.
