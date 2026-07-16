@@ -95,7 +95,11 @@ cell and random samples blindly regardless of the objective.
 **Two settings users will not think to ask for, and should:**
 * **`metric`** — the objective. Defaults to `net_pnl_pct`, which will happily buy return with
   drawdown. `return_over_dd` and `sharpe` are the risk-adjusted ones. If a user says they care
-  about drawdown or consistency, set it.
+  about drawdown or consistency, set it. For anything the built-ins can't express, pass a custom
+  formula: `"metric": "expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"` — variables
+  `net_pnl_pct`, `max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`,
+  `return_over_dd`; operators `+ - * / ( )`. It is MAXIMISED as written (penalties get a minus
+  sign; drawdown is a positive %). Works on `/jobs/sweep` (rbf) and `/jobs/robustness`.
 * **`min_trades`** (default 5) — a trial with fewer trades can never win. Do **not** set it to 0
   with `profit_factor` or `win_rate`: a config that never trades has no losses, so its profit
   factor is `+inf`, and the search will converge on a strategy that refuses to trade.

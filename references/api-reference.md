@@ -121,7 +121,8 @@ mode        "grid"|"random"|"rbf"   required
 trials      int    optional  (random/rbf; rbf calls it the budget)
 metric      string optional  (default "net_pnl_pct". The objective the search hill-climbs.
                               One of: net_pnl_pct | return_over_dd | sharpe | profit_factor |
-                              expectancy | win_rate | max_dd_pct (minimised).
+                              expectancy | win_rate | max_dd_pct (minimised) — or a custom
+                              expression "expr: <formula>", see below.
                               ONLY rbf steers — grid and random ignore it, see below)
 min_trades  int    optional  (default 5; 0..1000. A trial with fewer closed trades can never
                               win — not in the search, not in the results ranking. 0 disables)
@@ -141,6 +142,16 @@ to the single authored point and rbf exits non-zero in the container. Mark an in
 predetermined set of points no matter what the objective is, and you rank the output afterwards.
 Only `rbf` hill-climbs, so only `rbf` has a search to aim. Sending `metric` with grid/random is not
 an error — it simply has no effect.
+
+**Custom objective: `"metric": "expr: <formula>"`.** An arithmetic expression over the trial
+metrics, e.g. `"expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"`. Variables: `net_pnl_pct`,
+`max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`, `return_over_dd`
+(aliases: `pnl`, `dd`/`max_dd`, `n_trades`, `winrate`, `pf`, `romad`). Operators: `+ - * / ( )` and
+numeric literals. The search MAXIMISES the expression as written — a penalty term gets a minus
+sign, and `max_dd_pct` is a positive percentage (a 12% drawdown is `12`), so subtract it to punish
+risk. A malformed expression is rejected 400 with the parser's error. The `min_trades` floor
+applies to custom objectives too, and a division by zero disqualifies the trial rather than
+winning by infinity.
 
 **`min_trades` is what makes the non-PnL objectives safe.** Profit factor is gross profit / gross
 loss, so a config that *never trades* has no losses and scores `+inf`; win rate has the same trap
@@ -190,7 +201,8 @@ metric        string  optional  (default "net_pnl_pct". BOTH the statistic the p
                                   computed on AND the objective the search hill-climbs
                                   inside every permutation — deliberately the same value,
                                   see below. One of: net_pnl_pct | return_over_dd | sharpe |
-                                  profit_factor | expectancy | win_rate.
+                                  profit_factor | expectancy | win_rate — or a custom
+                                  "expr: <formula>", same syntax as the sweep metric.
                                   max_dd_pct is NOT accepted here — 400)
 search_mode   string  optional  ("fixed"(default)|"grid"|"random"|"rbf" — the SELECTION
                                   PROCEDURE re-run inside every permutation. See below: this
@@ -219,7 +231,10 @@ the search hill-climbs the statistic you ask for. Set it to whatever your sweep 
 statistic merely selects the maximum.)
 
 `max_dd_pct` is rejected here on purpose: every accepted statistic is higher-is-better, which is
-what makes the one-sided upper tail correct.
+what makes the one-sided upper tail correct. A custom `expr:` statistic is accepted — the engine
+maximises it as written, so making "high = good" true of the formula is the author's contract,
+exactly as it is when choosing which built-in to test. If the sweep that found the parameters used
+a custom expression, pass the **same expression** here (same-procedure rule).
 
 **`min_trades` is why a no-trade strategy cannot pass.** With no floor, a strategy that takes zero
 trades is a valid winner: its statistic is 0, every shuffled series also scores 0, and the test
