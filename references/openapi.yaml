@@ -166,6 +166,50 @@ paths:
       responses:
         "200": { description: Updated. }
 
+  /api/v1/strategies/from-github:
+    post:
+      operationId: importStrategyFromGithub
+      tags: [Strategies]
+      summary: Import a strategy from your connected GitHub repo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stem]
+              properties:
+                stem:
+                  type: string
+                  description: File stem of the tracked Pine file in your connected repo.
+      responses:
+        "201":
+          description: Created strategy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /api/v1/strategies/{id}/grant:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    post:
+      operationId: grantStrategy
+      tags: [Strategies]
+      summary: Share a strategy directly with another user by email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  description: Email of the user to grant read access to.
+      responses:
+        "200": { description: Granted. }
+
   /api/v1/validate:
     post:
       operationId: validateStrategy
@@ -360,6 +404,58 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
 
+  /api/v1/jobs/compare/analyse:
+    post:
+      operationId: analyseCompareJobs
+      tags: [Jobs]
+      summary: AI analysis comparing several jobs (descriptive).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                provider:
+                  type: string
+                  nullable: true
+                  description: Optional AI backend selector.
+      responses:
+        "200":
+          description: Comparative analysis.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/v1/jobs/patch-preview:
+    post:
+      operationId: patchPreview
+      tags: [Jobs]
+      summary: Preview a strategy's effective inputs after applying overrides, without running a job.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_id]
+              properties:
+                strategy_id: { type: string, format: uuid }
+                params_override:
+                  type: object
+                  nullable: true
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Effective input specs with overrides applied.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
   /api/v1/data/symbols:
     get:
       operationId: listSymbols
@@ -387,6 +483,35 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/CatalogEntry" }
+
+  /api/v1/data/saxo-catalog:
+    get:
+      operationId: listSaxoCatalog
+      tags: [Data]
+      summary: Cached Saxo datasets for the connected Saxo account.
+      responses:
+        "200":
+          description: Array of catalog entries (empty if no Saxo account is connected).
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CatalogEntry" }
+
+  /api/v1/data/massive-status:
+    get:
+      operationId: massiveStatus
+      tags: [Data]
+      summary: Whether the Massive data source is configured on the server.
+      responses:
+        "200":
+          description: Configuration status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: { type: boolean }
 
   /api/v1/data/fetch:
     post:
