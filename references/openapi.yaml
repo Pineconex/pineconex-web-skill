@@ -7,8 +7,10 @@ info:
     personal access token created in the web app under Account -> API keys, sent as
     `Authorization: Bearer pcx_live_...`.
   license:
-    name: CC BY 4.0
-    url: https://creativecommons.org/licenses/by/4.0/
+    # MIT (not CC BY like the prose docs): this is a functional spec meant to be embedded
+    # in code / ChatGPT Actions, and Creative Commons advises against CC for software.
+    name: MIT
+    identifier: MIT
 servers:
   - url: https://pineconex.com
     description: PineconeX production

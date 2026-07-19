@@ -123,4 +123,8 @@ live at [github.com/Pineconex/pineconex-web-api](https://github.com/Pineconex/pi
 
 ## License
 
-[CC BY 4.0](./LICENSE) — © 2026 PineconeX.
+Documentation (this README, `SKILL.md`, `references/api-reference.md`) is under
+[CC BY 4.0](./LICENSE) — © 2026 PineconeX. The OpenAPI spec
+[`references/openapi.yaml`](./references/openapi.yaml) is a functional file and is instead under
+the permissive [MIT license](./references/openapi.yaml.LICENSE), so you can embed it in your own
+code or a ChatGPT Action without attribution friction.
