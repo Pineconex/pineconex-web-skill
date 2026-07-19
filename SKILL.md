@@ -199,3 +199,16 @@ Strategy `code` is **Pine Script v6 for the PineconeX headless interpreter**, wh
 TradingView (chart/UI calls are silently ignored; alert primitives are repurposed). If you are
 authoring or editing the Pine source itself, prefer the dedicated Pine authoring guidance rather
 than assuming TradingView semantics.
+
+Two **PineconeX-exclusive namespaces** have no TradingView equivalent, so a plain Pine generator
+won't know them:
+
+* **`ml.*`** — run a pre-trained ONNX model in-strategy (`ml.predict(name, features)` →
+  `series float`). Upload the model on the Models page; **Premium** feature. Needs
+  `//@runtime=2026.07.16-ml` or newer.
+* **`gex.*`** — dealer **gamma exposure**: `gex.net` (regime sign), `gex.flip` (zero-gamma pivot),
+  `gex.pin` (magnet strike), `gex.call_wall`/`gex.put_wall` (± walls), `gex.g1..g5` (ranked strikes) —
+  all `series float`. Needs `//@runtime=2026.08.06-gex`+. **Availability caveat:** live GEX is fetched
+  from the options chain on **Saxo** (Eurex) today; a **backtest reads `na`** (historical options
+  chains aren't retained) so a GEX strategy backtests to no trades — validate + **paper-trade live**,
+  don't backtest it. `gex.*` is data for your own strategy, never a pushed buy/sell signal.

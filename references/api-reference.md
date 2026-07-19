@@ -13,6 +13,13 @@ _optional_ may be omitted or sent as `null`.
 
 ## Strategies
 
+The Pine v6 `code` may use two **PineconeX-exclusive namespaces** (no TradingView equivalent):
+`ml.*` (run an uploaded ONNX model in-strategy; **Premium**; `//@runtime=2026.07.16-ml`+) and
+`gex.*` (dealer **gamma exposure** — `gex.net`/`flip`/`pin`/`call_wall`/`put_wall`/`g1..g5`;
+`//@runtime=2026.08.06-gex`+). Live GEX is fetched from the options chain on **Saxo** (Eurex) today;
+a **backtest reads `na`** (no historical options data), so GEX strategies are paper-traded live, not
+backtested.
+
 ### POST /api/v1/strategies — create
 Request: `{ "code": "<pine v6 source>" }` (required).
 Response `201`: `StrategyResponse` (below). `name`/`description` are parsed from the source;
