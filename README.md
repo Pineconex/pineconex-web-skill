@@ -1,13 +1,44 @@
-# PineconeX API skill
+# AI Skill
 
-A skill that lets an AI assistant drive a [PineconeX](https://pineconex.com) account over its
-web API — create and validate Pine Script v6 strategies, run backtests / sweeps / robustness
-tests, and launch and monitor live trading bots. Works with **Claude** and **ChatGPT**.
+Let an AI assistant or agent drive your PineconeX account for you. The **PineconeX API skill** is a
+small, open package that teaches **Claude**, **ChatGPT**, or **OpenClaw** how to create and validate Pine
+Script v6 strategies, run backtests, parameter sweeps and robustness analysis, and launch
+and monitor live trading bots — all over the [web API](/app/api-docs), using an API key you
+control.
 
-First, get an API key: in the PineconeX web app go to **Account → API keys** and create a
-personal access token (it looks like `pcx_live_…` and is shown only once — copy it now).
+The skill is published in the public repo
+[Pineconex/pineconex-web-skill](https://github.com/Pineconex/pineconex-web-skill) under **CC BY 4.0**. Everything below links straight to it on GitHub.
 
-## Install in Claude
+## 1. Get an API key
+
+Create a **personal access token** under [Account → API keys](/app/account). A key looks like
+`pcx_live_…` and is shown **once** — copy it then. Keep it private: anyone with it can act on
+your account. Revoke a key any time from the same page.
+
+## 2. Download the skill
+
+Grab the whole repo as a zip, or clone it:
+
+- **[Download .zip](https://github.com/Pineconex/pineconex-web-skill/archive/refs/heads/main.zip)** — the complete skill (SKILL.md + references).
+- Or clone:
+
+```bash
+git clone https://github.com/Pineconex/pineconex-web-skill.git
+```
+
+Individual files (direct HTTPS download from GitHub):
+
+| File | Purpose | Download |
+|---|---|---|
+| `SKILL.md` | The skill definition — auth, workflows, guardrails. | [raw](https://raw.githubusercontent.com/Pineconex/pineconex-web-skill/main/SKILL.md) · [view](https://github.com/Pineconex/pineconex-web-skill/blob/main/SKILL.md) |
+| `references/api-reference.md` | Full endpoint reference. | [raw](https://raw.githubusercontent.com/Pineconex/pineconex-web-skill/main/references/api-reference.md) · [view](https://github.com/Pineconex/pineconex-web-skill/blob/main/references/api-reference.md) |
+| `references/openapi.yaml` | OpenAPI 3.1 spec for ChatGPT Actions. | [raw](https://raw.githubusercontent.com/Pineconex/pineconex-web-skill/main/references/openapi.yaml) · [view](https://github.com/Pineconex/pineconex-web-skill/blob/main/references/openapi.yaml) |
+
+**Which files do I need?** For **Claude**, use `SKILL.md` + `references/api-reference.md`
+(skip the openapi.yaml). For **ChatGPT / OpenAI**, use the same two files, **plus**
+`references/openapi.yaml` if you want the GPT to call PineconeX directly via an Action.
+
+## 3. Install in Claude
 
 **Claude Code (CLI / IDE).** Drop the skill into your Claude skills folder:
 
@@ -30,27 +61,65 @@ Then just ask, e.g. *"backtest my strategy on AAPL daily for 2020–2024 via Pin
 project's custom instructions, and upload `references/api-reference.md` as project knowledge.
 Give Claude your API key in chat when it asks (or run the `curl` commands it produces yourself).
 
-## Install in ChatGPT (Custom GPT)
+## 4. Install in ChatGPT (Custom GPT)
 
 1. In ChatGPT, open **Explore GPTs → Create**, then the **Configure** tab.
 2. Paste the contents of `SKILL.md` into **Instructions**, and upload
    `references/api-reference.md` under **Knowledge**.
 3. To let the GPT call PineconeX **directly**, add an **Action**:
-   - **Schema** → import the bundled [`references/openapi.yaml`](./references/openapi.yaml)
-     (paste its contents, or host it and paste the URL). It already targets `https://pineconex.com`.
+   - **Schema** → import the bundled `references/openapi.yaml` (paste its contents, or host it
+     and paste the URL). It already targets `https://pineconex.com`.
    - **Authentication** → *API Key*, **Auth Type** *Bearer*, and paste your `pcx_live_…` key.
    - Without an Action the GPT still works — it will hand you the exact `curl` commands to run.
 
-Keep your API key private; anyone with it can act on your PineconeX account. Revoke a key any
-time under **Account → API keys**.
+## 5. Install in OpenClaw
 
-## Contents
+[OpenClaw](https://openclaw.ai) is a local, open-source AI assistant. Install the skill straight
+from GitHub with its CLI:
 
-- [`SKILL.md`](./SKILL.md) — the skill definition (auth, workflows, guardrails).
-- [`references/api-reference.md`](./references/api-reference.md) — full endpoint reference.
-- [`references/openapi.yaml`](./references/openapi.yaml) — OpenAPI 3.1 spec for ChatGPT Actions.
+```bash
+openclaw skills install git:Pineconex/pineconex-web-skill
+```
 
-Full API docs: [https://github.com/Pineconex/pineconex-web-api](https://github.com/Pineconex/pineconex-web-api).
+This adds it under `~/.openclaw/skills/` (shared across your agents; append `--global` to force
+that scope, or install into a workspace's `skills/` folder for a single agent).
+
+Give it your API key. Because OpenClaw runs locally, a shell export works:
+
+```bash
+export PINECONEX_API_KEY=pcx_live_your_key_here
+```
+
+Or wire it into `~/.openclaw/openclaw.json` so it's injected on every run:
+
+```json5
+{
+  skills: {
+    entries: {
+      "pineconex-api": {
+        enabled: true,
+        env: { PINECONEX_API_KEY: "pcx_live_your_key_here" },
+      }
+    }
+  }
+}
+```
+
+Then just ask, e.g. *"backtest my strategy on AAPL daily for 2020–2024 via PineconeX."*
+
+## Safety
+
+- **The skill acts as you.** Anything you can do in the web app, the assistant can do with your
+  key — including launching and stopping **live bots that trade real broker accounts**. Confirm
+  symbol, broker, and intent before it goes live.
+- **Never paste your key into a shared prompt or public GPT.** Prefer the environment variable
+  (`PINECONEX_API_KEY`) so the key stays out of chat transcripts.
+- Revoke any key immediately from [Account → API keys](/app/account) if it may have leaked.
+
+---
+
+Prefer to call the API yourself? See the [API reference](/app/api-docs). Full public API docs
+live at [github.com/Pineconex/pineconex-web-api](https://github.com/Pineconex/pineconex-web-api).
 
 ## License
 
