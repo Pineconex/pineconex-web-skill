@@ -193,6 +193,15 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 Full request/response field shapes: **`references/api-reference.md`** (read it when you need
 exact field names, optional vs. required, or the `inputs`/`params` formats for parameter overrides).
 
+**`params_json5`** (the strategy's saved parameter file, `GET/PUT …/params`) is **JSON5** — an
+**array** of `{ symbol, configs: [ { tf, …overrides } ] }`. Each config runs a separate backtest;
+keys other than `tf` map to Pine **input variable names** and override their defaults. It's a
+live/backtest deployment override only — **sweep and significance ignore it**.
+
+```json5
+[ { symbol: "AAPL", configs: [ { tf: "1D", sma_len: 20, use_filter: true } ] } ]
+```
+
 ## Writing strategies
 
 Strategy `code` is **Pine Script v6 for the PineconeX headless interpreter**, which diverges from

@@ -62,6 +62,27 @@ overrides. Each has `kind` plus `var_name`, `title`, `defval`, `swept`, and kind
 ### GET /api/v1/strategies/{id}/params → `{ "params_json5": string|null }`
 ### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
 
+The `params_json5` value is a **JSON5** document (comments + trailing commas allowed) shaped as an
+**array of per-symbol entries**, each with a `configs` array — every config runs a separate backtest
+for that `symbol` + `tf`. Keys inside a config other than `tf` map to **Pine input variable names**
+and override that input's default. A blank/whitespace-only body clears the file.
+
+```json5
+[
+  {
+    symbol: "AAPL",
+    configs: [
+      { tf: "1D", sma_len: 20, use_filter: true },  // one backtest
+      { tf: "60m", sma_len: 14 },                    // another
+    ],
+  },
+  { symbol: "MSFT", configs: [ { tf: "1D", sma_len: 50 } ] },
+]
+```
+
+It is a **live/backtest deployment override only** — sweep and significance jobs deliberately ignore
+it (they produce or permute configs themselves).
+
 ### POST /api/v1/strategies/{id}/share — set visibility (`{ "visibility": "private"|"shared_open"|"shared_protected" }`)
 
 ### POST /api/v1/strategies/{id}/grant — share directly with another user
