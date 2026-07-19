@@ -524,7 +524,7 @@ The token is HS256, signed with that instance's per-instance secret, **60-second
 the subdomain. `400` if the account has no active Dedicated VPS. (This is what the "Go to my VPS"
 button calls.)
 
-### GET /api/auth/sso?token=<jwt> — Dedicated-instance login (no auth header)
+### GET /api/auth/sso?token={jwt} — Dedicated-instance login (no auth header)
 The **only login path on a Dedicated instance** (`INSTANCE_MODE=dedicated`) — there is no OAuth
 and no login page. Verifies the handoff token against the instance's `SSO_SECRET`, checks the
 email against the instance allowlist, admits it as a **box admin**, sets the refresh cookie, and
