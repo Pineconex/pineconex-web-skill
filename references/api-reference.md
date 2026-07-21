@@ -99,6 +99,47 @@ Response: `{ "status": "valid"|"invalid", "errors": [string], "warnings": [strin
 
 ---
 
+## ML models — **Premium plan or higher**
+
+Upload an ONNX model and call it from Pine with the `ml.*` namespace. All three endpoints are
+gated on **Premium** (`403` on any lower plan, including `pro` and `dedicated`). Models are
+private to your account.
+
+### GET /api/v1/models → array
+```
+id            uuid
+name          string
+version       int        (auto-incremented per (account, name))
+sha256        string     (hex digest of the .onnx bytes)
+size_bytes    int
+input_dim     int | null
+output_dim    int | null
+created_at    datetime
+last_used_at  datetime | null
+```
+
+### POST /api/v1/models — upload
+```
+name      string  required  (1..64 chars, must start alphanumeric, [A-Za-z0-9._-] only, no "..")
+data_b64  string  required  (standard base64 of the raw .onnx file)
+```
+Max **20 MiB decoded** (this route's body cap is raised to 32 MiB for the base64 overhead).
+Response `201`: `{ id, name, version, sha256, size_bytes, input_dim, output_dim }`.
+
+Uploading **re-versions** rather than overwrites: the same `name` gets `version = max + 1`.
+
+The model is parsed and optimized at upload time (no inference is run), and rejected `400` if it
+does not fit the calling convention: exactly **one input tensor**, input dtype `f32`/`f64` with a
+concrete last dimension, output dtype `f32`/`f64`/`i64`. Unsupported operator sets
+(`TreeEnsemble*`, `Scaler`, `ZipMap`, …) are named in the error. Requires
+`//@runtime=2026.07.16-ml` or later to actually run.
+
+### DELETE /api/v1/models/{id} → `204`
+Deletes the version (not the whole `name` lineage) and removes the file from every runner.
+`404` if the id is not yours.
+
+---
+
 ## Jobs
 
 All launch endpoints return **`201`** with a `JobResponse`. Poll `GET /api/v1/jobs/{id}` for `status`.
@@ -341,18 +382,29 @@ Live trading is not plan-gated. What a tier buys is *capacity* — live bots dra
 concurrent-job quota as everything else (free 1, higher tiers more), so a `403` here means the
 quota is full, not that the plan is too low.
 ```
-strategy_id      uuid    required
-symbol           string  required
-timeframe        string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no weekly/monthly/1m)
-htf_timeframe    string  optional
-execute_orders   bool    optional  (default true)
-heartbeat_secs   int     optional
-auto_restart     bool    optional  (default false)
-params_override  object  optional  { var_name: number|bool }
-broker           string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp")
-saxo_env         string  optional  ("sim"|"live"; Saxo only)
-webhook_url      string  optional  (http/https; receives order/trade/fill events)
+strategy_id         uuid    required  (must be validated — `status: "valid"` — or 400)
+symbol              string  required
+timeframe           string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no
+                                       weekly/monthly/1m. "1H"→60m and "4H"→240m are aliased,
+                                       but 240m is not in the live subset, so 1D/90m/60m/30m/
+                                       15m/5m are the six that actually launch)
+htf_timeframe       string  optional
+intrabar_timeframe  string  optional
+execute_orders      bool    optional  (default true; false = signals + webhooks, no broker orders)
+heartbeat_secs      int     optional
+auto_restart        bool    optional  (default false)
+params_override     object  optional  { var_name: number|bool }
+broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp")
+saxo_env            string  optional  ("sim"|"live"; Saxo only)
+webhook_url         string  optional  (http/https; receives order/trade/fill events)
 ```
+
+`broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
+`400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp`.
+
+Errors specific to this endpoint: `429` if you exceed 30 launches/min; `400 "Concurrent job limit
+reached (N)…"` when the plan's quota is full; `400 "<Broker> not connected: …"` when the broker
+has no stored credentials; `503` when every runner in the fleet is at capacity.
 
 **The broker is not a detail — it changes what protective orders exist.** Pine is the same on
 every venue; the order model underneath is not, and the difference is not guessable:
@@ -377,6 +429,8 @@ has no purchase price anywhere. Rather than invent one, the bot logs that it can
 holding and stays flat. Fund a Bitstamp bot's account by **buying** the coin, not depositing it.
 
 ### GET /api/v1/jobs — list (recent) → array of `JobResponse`
+Your own jobs, newest first, hard-capped at **50**. There are no query parameters — no
+`limit`/`offset`, no status or type filter, no pagination cursor. Filter client-side.
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
 ### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type)
 - **backtest** — performance metrics + `hurst` / `variance_ratio`
@@ -398,12 +452,16 @@ accepted as a `?token=` query parameter (that path is reserved for the web UI's 
 token, since browser `EventSource` can't set headers).
 ### DELETE /api/v1/jobs/{id} — stop/cancel (live: soft-cancel kept in history; batch: hard delete)
 ### POST /api/v1/jobs/{id}/analyse — AI (descriptive) analysis of results
+Request: `{ "provider": "gemini"|"mistral"|null }` (null = the server default; see
+`GET /api/ai/providers`). The job must be `completed`.
+Response: `{ "analysis": "<markdown>", "model": "<model id>" }`.
 ### POST /api/v1/jobs/compare/analyse — AI (descriptive) analysis comparing several jobs
-Request: `{ "ids": [uuid, …], "provider": string|null }` (optional `provider` picks the AI backend).
+Request: `{ "ids": [uuid, …], "provider": string|null }` — **2 to 6** ids, each completed and
+yours (`400 "Expected 2–6 job IDs"` otherwise). Same response shape as `/analyse`.
 ### POST /api/v1/jobs/patch-preview — preview a strategy's inputs after overrides, without running
-Request: `{ "strategy_id": uuid, "params_override": {…}|null }`. Returns the effective input specs
-with the overrides applied — the cheap way to check a `params_override` resolves before launching a
-job with it.
+Request: `{ "strategy_id": uuid, "params_override": {…}|null }`. Returns
+`{ "code": "<pine source with the defaults rewritten>" }` — the cheap way to check a
+`params_override` resolves before launching a job with it.
 
 ---
 
@@ -465,17 +523,69 @@ Response: the resulting catalog entry.
 Whether the Massive data source is configured on the server (i.e. whether `source: "massive"`
 fetches will work). No account of your own is required.
 
+**The catalog is a shared, platform-wide cache, not per-account storage.** `POST /data/fetch` adds
+to it and any account may then use the cached series. Conversely there is no user-facing way to
+delete or edit a cached dataset — eviction is the retention watchdog's job, and the repair/delete
+endpoints are operator-only. A `data_source` a symbol has no ticker for returns `400`, and old
+intraday windows may simply not exist at the source (Yahoo cuts off at 730 days).
+
 ---
 
 ## Brokers
 
-`GET /api/v1/alpaca/status` · `GET /api/v1/saxo/status` · `GET /api/v1/ibkr/status` ·
-`GET /api/v1/lightspeed/status` · `GET /api/v1/bitstamp/status`
+Every broker exposes the same three shapes: a **status** read, a **connect** write, and a
+**disconnect**. Status is always safe to poll; the disconnect is idempotent (`204` even if
+nothing was stored). Credentials are encrypted at rest and are stripped out of any job config
+that is persisted.
 
-Connecting a broker is **web-UI only** for the OAuth brokers (Saxo, Alpaca OAuth) — there is no
-API path to complete a redirect flow.
+| Broker | Connect over the API? | How |
+|---|---|---|
+| **Bitstamp** | yes | `POST /bitstamp/credentials` — API key + secret |
+| **Alpaca** | yes | `POST /alpaca/keys` — key id + secret (the OAuth flow is browser-only) |
+| **Lightspeed** | yes | `POST /lightspeed/credentials` |
+| **IBKR** | yes | `POST /ibkr/settings` — host/port of your own TWS or Gateway |
+| **Saxo** | **no** | OAuth + PKCE redirect; must be completed in the web UI |
 
-**Bitstamp** authenticates with an API key + secret, so it can be connected over the API:
+### Saxo — `GET /api/v1/saxo/status`
+```
+connected               bool
+expired                 bool          (access token past expires_at; false when not connected)
+expires_at              datetime|null
+env                     string        ("sim"|"live"; falls back to the server default when
+                                       not connected — this field is never null)
+margin_trading_allowed  bool|null     (Saxo IsMarginTradingAllowed, captured at connect)
+```
+`POST /api/v1/saxo/connect` (body `{ "env": "sim"|"live" }`, optional) returns
+`{ "url": … }` — an authorization URL you must open in a **browser**; the PKCE verifier is held
+server-side against the `state`, so the redirect cannot be completed from a script.
+`DELETE /api/v1/saxo/disconnect` → `204`.
+
+### Alpaca — `GET /api/v1/alpaca/status`
+```
+connected         bool
+mode              string|null   ("oauth"|"apikey")
+region            string|null   ("us"|"eu")
+env               string|null   ("paper"|"live")
+account_id        string|null   (Alpaca account_number)
+scope             string|null   (OAuth scopes; null in apikey mode)
+multiplier        int|null      (1 = cash, 2 = margin, 4 = day-trading margin)
+shorting_enabled  bool|null
+```
+
+### POST /api/v1/alpaca/keys → `204` — connect with an API key pair
+```
+key_id  string  required
+secret  string  required
+region  string  optional  ("us" default; "eu" is rejected 400 — not supported yet)
+env     string  optional  ("paper" default | "live" = REAL MONEY)
+```
+The pair is verified against Alpaca's `/v2/account` before it is stored, and `multiplier` +
+`shorting_enabled` are captured from that same response — which is how the bot knows whether a
+short entry is even possible on your account. Saving keys clears any OAuth token, and vice versa:
+an account is in exactly one `mode`.
+
+`POST /api/v1/alpaca/connect` (body `{ "region": "us" }`, optional) returns an OAuth
+`{ "url": … }` for the browser flow. `DELETE /api/v1/alpaca/disconnect` → `204`.
 
 ### POST /api/v1/bitstamp/credentials → `204`
 ```
@@ -490,22 +600,123 @@ carry the **"View your transactions"** permission: Bitstamp's order status has n
 so transactions are the only place a bot can learn what it paid. A key without it is rejected
 at connect rather than mid-trade.
 
-### DELETE /api/v1/bitstamp/disconnect → `204`
-
 `GET /api/v1/bitstamp/status` → `{ connected, env, account }`, where `account` lists the funded
-currencies (Bitstamp has no account number).
+currencies (Bitstamp has no account number). `DELETE /api/v1/bitstamp/disconnect` → `204`.
+
+### POST /api/v1/lightspeed/credentials → `204`
+```
+api_key  string  required
+account  string  required
+env      string  required  ("cert" | "production")
+ws_url   string  required
+```
+Stored as given — unlike Alpaca and Bitstamp there is **no verification round-trip**, so a bad
+credential surfaces when a bot launches, not here.
+`GET /api/v1/lightspeed/status` → `{ connected, account, env, ws_url }`.
+`DELETE /api/v1/lightspeed/disconnect` → `204`.
+
+### POST /api/v1/ibkr/settings → `204`
+```
+host       string  required  (your TWS / IB Gateway host)
+port       int     required  (non-zero)
+client_id  int     required  (base client id)
+```
+IBKR is not a hosted credential — you point PineconeX at **your own** running TWS/Gateway. The
+host is SSRF-guarded: loopback, RFC1918 and link-local addresses are refused
+(`400 "host is not a permitted address"`). `client_id` is the base reserved for data fetches;
+each live bot is assigned `base+1` upward, skipping ids already in use by your running jobs.
+`GET /api/v1/ibkr/status` → `{ connected, host, port, client_id }`.
+`DELETE /api/v1/ibkr/disconnect` → `204`.
+
+**IBKR Web API (OAuth) is a stub pending IBKR onboarding.** `GET /api/v1/ibkr/web/status` always
+returns `{ "connected": false, "account_id": null }` and `POST /api/v1/ibkr/web/connect` always
+returns `400 "IBKR Web API integration is pending onboarding approval."` Do not build against it.
 
 ---
 
 ## Account & keys
 
-### GET /api/v1/auth/me → profile   ·   PATCH /api/v1/auth/me — update profile fields
+### GET /api/v1/auth/me → profile
+```
+id                  uuid
+email               string
+plan                "free" | "pro" | "premium" | "dedicated" | "admin"
+name                string | null
+phone               string | null
+telegram_handle     string | null
+telegram_bot_token  string | null   (returned decrypted — it is your own credential)
+telegram_chat_id    string | null
+github_id           int    | null
+github_linked_repo  string | null   ("owner/repo")
+created_at          datetime
+dedicated_vps       object | null   ({ subdomain, status }; Dedicated tier only)
+```
+
+### PATCH /api/v1/auth/me — update profile fields → the same profile object
+All fields optional: `email`, `phone`, `telegram_handle`, `telegram_bot_token`,
+`telegram_chat_id`, `github_linked_repo`.
+
+**Two different update semantics, which is easy to get wrong.** `telegram_*`,
+`github_linked_repo` and `email` are *coalesced* — omitting them (or sending `""`) leaves the
+stored value alone, so they cannot be cleared here. `phone` is written **unconditionally**:
+omitting it **erases** your stored phone number. Send it back on every PATCH unless you mean to
+clear it. A non-empty phone must start with `+` and hold 7–15 digits.
+
+Changing `github_linked_repo` also moves the sync webhook: it is deleted from the old repo and
+registered on the new one.
+
+### DELETE /api/v1/auth/me → `204` — GDPR Art. 17 erasure. **Irreversible.**
+Stops and deletes every running job, hard-deletes your strategies, bot events and parse errors
+(cascading to jobs, results, shares and all stored broker credentials), anonymises the account
+row, and invalidates the session. Billing columns are retained for tax records. There is no undo
+and no confirmation step — the request itself is the confirmation.
+
+### POST /api/v1/auth/telegram/test → `204`
+No body. Sends a canned message to the Telegram bot token + chat id stored on your profile, so
+you can prove the wiring before a bot depends on it. `400` names the missing half
+(`"Telegram bot token not configured"` / `"Telegram chat ID not configured"`) or relays
+Telegram's own error.
+
 ### GET /api/v1/newsletter/me → `{ "subscribed": bool }`   ·   PUT /api/v1/newsletter/me — body `{ "subscribed": bool }` → `{ "subscribed": bool }`
 Opt your account in or out of the product-updates newsletter (keyed by your account email).
 ### GET /api/v1/auth/keys → list your keys (metadata only; never the secret)
 ### POST /api/v1/auth/keys — mint a key. **Session-JWT only** (an API key cannot mint keys → 403).
 Request `{ "name": string }`. Response `{ id, name, key_prefix, key }` — `key` shown once.
 ### DELETE /api/v1/auth/keys/{id} — revoke → `204`
+
+---
+
+## GitHub
+
+Link a GitHub repo and import Pine files from it (see
+`POST /api/v1/strategies/from-github`). **Linking is browser-only** — the OAuth redirect cannot be
+completed from a script — but once linked, the read endpoints work with an API key. All of them
+return `400 "No GitHub account linked"` until the browser flow has run once.
+
+### GET /api/v1/auth/github → `{ "url": … }`
+The authorization URL to open in a browser (scopes `read:user user:email repo write:repo_hook`).
+`GET /api/v1/auth/github/callback` and `.../exchange` are steps of that redirect dance and are not
+useful to call directly.
+
+### GET /api/v1/auth/github/repos → `[{ "full_name": "owner/repo" }]`
+Note: **private repos only** — public ones are deliberately filtered out.
+Set the chosen one via `PATCH /api/v1/auth/me` `{ "github_linked_repo": "owner/repo" }`.
+
+### GET /api/v1/auth/github/files → array
+The linked repo's tree, grouped by file **stem** — the unit `from-github` imports.
+```
+stem   string  (path without extension, e.g. "strategies/mrpivot")
+pine   bool    (a <stem>.pine exists)
+json5  bool    (a <stem>.json5 exists — the params override, see /strategies/{id}/params)
+md     bool    (a STRATEGY.md exists in that stem's directory)
+```
+
+### GET /api/v1/auth/github/file?path={repo-relative path} → `{ "content": "<file text>" }`
+Path traversal (`..`, `.`) is rejected `400 "invalid path"`.
+
+### POST /api/v1/auth/github/sync-webhook → `204`
+No body. Re-registers the push webhook on the linked repo — the repair for a webhook that was
+deleted on the GitHub side. `204` means "request sent"; it does not prove GitHub accepted it.
 
 ---
 
@@ -531,14 +742,9 @@ email against the instance allowlist, admits it as a **box admin**, sets the ref
 `302`s into `/app/strategies`. `401` on a bad/expired token, a non-allowlisted email, or a
 non-dedicated instance. Security rests on the per-instance HMAC secret + TTL, not on the URL.
 
-### Admin — Dedicated instance management (admin auth only)
-Operator endpoints on the shared platform; `require_admin` (an API key is rejected → `403`).
-- `GET /api/admin/vps` — list all Dedicated instances.
-- `POST /api/admin/vps` — `{ user_id, subdomain, region: "eu"|"us", stripe_subscription_id? }` → `{ id }`.
-- `PATCH /api/admin/vps/{id}` — optional `{ subdomain, region, status, vps_ip, hetzner_server_id, dns_record_created, stripe_subscription_id }` → `204`. Setting `status` to `deprovisioned` **deletes the Hetzner box**.
-- `DELETE /api/admin/vps/{id}` — remove the row → `204`.
-
-`status` ∈ `pending` · `provisioning` · `active` · `suspended` · `deprovisioned`.
+On a Dedicated instance the admitted owner is a **box admin**, which unlocks the operator surface
+under `/api/admin/*`. That surface is documented separately — see the
+[`vps` branch of the docs repo](https://github.com/Pineconex/pineconex-web-api/tree/vps).
 
 ---
 
@@ -548,12 +754,25 @@ Operator endpoints on the shared platform; `require_admin` (an API key is reject
   (query string) — including for the SSE logs stream.
 - **Rate limits (per user, `429`):** validation ≈ 20/min, job launches ≈ 30/min. On `429`, back off
   and retry later — don't loop.
-- **Plan quotas (`403`):** concurrent running jobs and total strategies are capped by plan.
-- **Plan-gated features (`403`):** only **robustness** (`POST /jobs/robustness`) and **stress**
-  (`POST /jobs/stress`) require a plan — **Premium** or higher. They are also the two most
-  expensive job types (a permutation test is N full backtests), so the gate doubles as a cost
-  control. Backtest, sweep and **live trading are open to every plan, free included** — a `403`
-  on `/jobs/live` is the concurrent-job quota, not the tier.
+- **Plan quotas** are enforced at launch/create time and come back as **`400` with a message
+  naming the limit** (not `403`), e.g. `"Concurrent job limit reached (1). Wait for a running job
+  to finish."`
+
+  | Plan | Concurrent jobs | Strategies | ML models |
+  |---|---|---|---|
+  | `free` | 1 | 5 | 0 |
+  | `pro` | 5 | unlimited | 0 |
+  | `premium` | 10 | unlimited | unlimited |
+
+  (The numbers are server-configurable defaults, so treat the error message as authoritative.)
+- **Plan-gated features (`403 forbidden`, no message):** **robustness** (`POST /jobs/robustness`),
+  **stress** (`POST /jobs/stress`) and the **ML model** endpoints (`/models/*`) require **Premium**.
+  The two job types are also the most expensive on the platform (a permutation test is N full
+  backtests), so the gate doubles as a cost control. Backtest, sweep and **live trading are open to
+  every plan, free included** — a rejection on `/jobs/live` is the concurrent-job quota, not the
+  tier.
+- **A disabled or deleted account is `401`, not `403`** — the plan is re-read from the database on
+  every single request, so revoking access takes effect immediately, mid-session and mid-key.
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
 - **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.
 - **Errors** are `{ "error": string }` with the HTTP status; `401` = missing/invalid/expired key.
