@@ -9,6 +9,9 @@ control.
 The skill is published in the public repo
 [Pineconex/pineconex-web-skill](https://github.com/Pineconex/pineconex-web-skill) under **CC BY 4.0**. Everything below links straight to it on GitHub.
 
+> Running a **Dedicated VPS** instance? You are an admin of your own box, and the
+> [`vps` branch](../../tree/vps) carries the same skill plus the `/api/admin` operator surface.
+
 ## 1. Get an API key
 
 Create a **personal access token** under [Account → API keys](/app/account). A key looks like
@@ -23,7 +26,7 @@ Grab the whole repo as a zip, or clone it:
 - Or clone:
 
 ```bash
-git clone https://github.com/Pineconex/pineconex-web-skill.git
+git clone -b main https://github.com/Pineconex/pineconex-web-skill.git
 ```
 
 Individual files (direct HTTPS download from GitHub):
@@ -34,6 +37,7 @@ Individual files (direct HTTPS download from GitHub):
 | `references/api-reference.md` | Full endpoint reference. | [raw](https://raw.githubusercontent.com/Pineconex/pineconex-web-skill/main/references/api-reference.md) · [view](https://github.com/Pineconex/pineconex-web-skill/blob/main/references/api-reference.md) |
 | `references/openapi.yaml` | OpenAPI 3.1 spec for ChatGPT Actions. | [raw](https://raw.githubusercontent.com/Pineconex/pineconex-web-skill/main/references/openapi.yaml) · [view](https://github.com/Pineconex/pineconex-web-skill/blob/main/references/openapi.yaml) |
 
+
 **Which files do I need?** For **Claude**, use `SKILL.md` + `references/api-reference.md`
 (skip the openapi.yaml). For **ChatGPT / OpenAI**, use the same two files, **plus**
 `references/openapi.yaml` if you want the GPT to call PineconeX directly via an Action.
@@ -43,7 +47,7 @@ Individual files (direct HTTPS download from GitHub):
 **Claude Code (CLI / IDE).** Drop the skill into your Claude skills folder:
 
 ```bash
-git clone https://github.com/Pineconex/pineconex-web-skill
+git clone -b main https://github.com/Pineconex/pineconex-web-skill
 mkdir -p ~/.claude/skills/pineconex-api
 cp -r pineconex-web-skill/SKILL.md pineconex-web-skill/references ~/.claude/skills/pineconex-api/
 ```
@@ -115,6 +119,7 @@ Then just ask, e.g. *"backtest my strategy on AAPL daily for 2020–2024 via Pin
 - **Never paste your key into a shared prompt or public GPT.** Prefer the environment variable
   (`PINECONEX_API_KEY`) so the key stays out of chat transcripts.
 - Revoke any key immediately from [Account → API keys](/app/account) if it may have leaked.
+
 
 ---
 

@@ -187,8 +187,19 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Validate | `POST /api/v1/validate` |
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
-| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp}/status`, `POST /api/v1/bitstamp/credentials`, `DELETE /api/v1/bitstamp/disconnect` |
-| Account | `GET/PATCH /api/v1/auth/me`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
+| ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
+| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `DELETE /api/v1/{…}/disconnect` |
+| GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |
+| Account | `GET/PATCH/DELETE /api/v1/auth/me`, `POST /api/v1/auth/telegram/test`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
+
+Two of those are **irreversible and must never be called without the user asking for it in
+those words**: `DELETE /api/v1/auth/me` erases the whole account (GDPR Art. 17 — every strategy,
+job and stored broker credential, no undo, no confirmation step), and `DELETE /api/v1/models/{id}`
+drops a model version permanently. Neither is a cleanup step.
+
+Saxo cannot be connected from here at all (OAuth redirect — browser only), and `PATCH
+/api/v1/auth/me` has a trap: `phone` is written unconditionally, so **omitting it erases the
+stored number**. Send it back unless the user wants it cleared.
 
 Full request/response field shapes: **`references/api-reference.md`** (read it when you need
 exact field names, optional vs. required, or the `inputs`/`params` formats for parameter overrides).
