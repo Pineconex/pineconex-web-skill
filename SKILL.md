@@ -6,6 +6,9 @@ description: >-
   significance) tests, launch and monitor live trading bots, and fetch results.
   Use whenever the user wants to operate PineconeX programmatically (not through
   the web UI) with an API key.
+  On a Dedicated VPS instance the account owner is a box admin, so this also covers
+  the /api/admin operator surface: users, plans, symbols, the runner fleet, runtime
+  images, health and the Dedicated-VPS registry.
 ---
 
 # PineconeX Web API
@@ -232,3 +235,98 @@ won't know them:
   from the options chain on **Saxo** (Eurex) today; a **backtest reads `na`** (historical options
   chains aren't retained) so a GEX strategy backtests to no trades — validate + **paper-trade live**,
   don't backtest it. `gex.*` is data for your own strategy, never a pushed buy/sell signal.
+
+## Admin surface — `/api/admin/*`
+
+This build of the skill also covers the **operator** API: users, plans, the symbol universe, the
+runner fleet, runtime images, health, statistics and the Dedicated-VPS registry.
+
+**You only have it if the key's account is on the `admin` plan.** The gate reads the plan, not how
+you authenticated, so an admin's `pcx_live_…` key is a *full-admin* key — there is no read-only
+admin scope. On a **Dedicated VPS** instance (`<subdomain>.pineconex.com`) the account owner is
+admitted as a box admin, which is the normal case for this skill.
+
+Check before you plan any admin work — this is one request and it saves proposing a workflow that
+will only 403:
+
+```bash
+auth "$PINECONEX_API_URL/api/v1/auth/me" | jq -r .plan   # "admin" → the endpoints below exist
+```
+
+`/api/admin/*` is **not** under `/api/v1` and is not part of the versioned public contract — it can
+change without a major-version bump. Full field shapes: **`references/admin-reference.md`**.
+
+### Guardrails — these are different from the user surface
+
+The user API acts on one account. This one acts on **other people's** accounts and on the
+infrastructure, and several calls are not undoable by any subsequent call.
+
+- **Never call a destructive admin endpoint on your own initiative.** Read-only endpoints
+  (`GET`) are fine to explore. Anything that writes needs the user to have asked for that specific
+  change. In particular, always confirm first:
+
+  | Call | What actually happens |
+  |---|---|
+  | `PATCH /api/admin/vps/{id}` with `status: "deprovisioned"` | **destroys the customer's server.** Use `"suspended"` to cut access without killing the box |
+  | `PATCH /api/admin/users/{id}/plan` off `pro`/`premium` | **cancels their Stripe subscription immediately** — no refund, no proration |
+  | `DELETE /api/admin/users/{id}` | hard-deletes their strategies, bot events and parse errors |
+  | `DELETE /api/admin/vps/{id}` | removes the tracking row **without** touching the box — orphans a running server nothing records any more |
+  | `DELETE /api/admin/jobs/{id}` on a live job | cancels resting broker orders but **leaves the open position**, now unmanaged |
+
+- **`PATCH /api/admin/symbols/{id}` is a full replace, not a partial update.** An omitted field is
+  written as `NULL`. Always `GET /api/admin/symbols`, edit the one object, and send the whole thing
+  back. A sparse PATCH silently erases every ticker mapping you left out.
+  (`/runners`, `/vps` and `/runtime-versions` *are* partial; `PATCH /api/admin/settings` requires
+  **all twelve** fields or it is rejected `422`. Three endpoints, three semantics — check, don't
+  assume.)
+- **A `204` is not proof anything existed.** `DELETE /runners/{id}`, `DELETE /vps/{id}`,
+  `DELETE /runtime-versions/{v}` and `PATCH /vps/{id}` all return success for ids that never
+  existed. Verify with a follow-up `GET` when it matters.
+- **Admin reads contain other users' PII** — emails, IP addresses, login history. Summarise; do
+  not dump user tables into output the user did not ask for, and never into a file or a webhook.
+
+### Common operator workflows
+
+**Promote a new engine version.** Registering is not deploying — the image must already be on
+every runner, or jobs pinned there fail on that host only:
+
+```bash
+auth "$PINECONEX_API_URL/api/admin/runtime-availability"        # is it present on every runner?
+auth -X POST "$PINECONEX_API_URL/api/admin/runtime-versions" \
+  -H "Content-Type: application/json" -d '{"version":"2026.08.06-gex","notes":"gex namespace"}'
+auth -X POST "$PINECONEX_API_URL/api/admin/runtime-versions/2026.08.06-gex/default"
+```
+The default is what unpinned jobs **and every live bot** run — live bots ignore user pins entirely,
+so this call is how an engine fix reaches live trading. Deactivating a version auto-demotes it, so
+never deactivate the current default without promoting a replacement first.
+
+**Drain a runner before maintenance.** `PATCH /api/admin/runners/{id}` with
+`{"is_active": false}` stops new dispatch while running jobs finish. The `DELETE` refuses while
+work remains (`400 "runner has N active job(s)"`), which is the check, not an obstacle.
+
+**Diagnose "my data is stale".** `GET /api/admin/data-delay?symbol_id=…&timeframe=…` asks every
+source at once. Read it carefully: a failing source reports in its own `error` field, so a `200`
+with five errors is a normal response; **Massive ignores the timeframe** and always reports the
+previous trading day, so its large delay is by design; and the IBKR row's price comes from Yahoo
+(IBKR is only probed for reachability).
+
+**Spot a validator abuser.** `GET /api/admin/validator-stats` — the signal is `crash_rate`, not
+`fail_ratio`. Bad Pine *fails validation*; it does not crash the validator, so a legitimate user's
+crash rate is ≈0 no matter how bad their code. A high `fail_ratio` alone is just a beginner.
+
+### Admin endpoint catalog
+
+| Area | Endpoints |
+|---|---|
+| Users | `GET /api/admin/users`, `PATCH /api/admin/users/{id}/plan`, `DELETE /api/admin/users/{id}` |
+| Settings | `GET/PATCH /api/admin/settings` (all twelve fields required on PATCH) |
+| Symbols | `GET/POST /api/admin/symbols`, `PATCH/DELETE /api/admin/symbols/{id}`, `POST /api/admin/symbols/refresh-ticks` |
+| Options / GEX | `GET/POST /api/admin/options-overrides`, `DELETE /api/admin/options-overrides?tv_symbol=`, `GET /api/admin/gex/preview` |
+| Fleet | `GET/POST /api/admin/runners`, `PATCH/DELETE /api/admin/runners/{id}` |
+| Runtimes | `GET/POST /api/admin/runtime-versions`, `PATCH/DELETE /api/admin/runtime-versions/{v}`, `POST /api/admin/runtime-versions/{v}/default`, `GET /api/admin/runtime-availability` |
+| Dedicated VPS | `GET/POST /api/admin/vps`, `PATCH/DELETE /api/admin/vps/{id}` |
+| Jobs | `GET /api/admin/jobs`, `DELETE /api/admin/jobs/{id}` |
+| Health | `GET /api/admin/health`, `GET /api/admin/health/history`, `GET /api/admin/container-stats` |
+| Statistics | `GET /api/admin/{parse,runtime,validator,rate-limit}-stats` |
+| Data delay | `GET /api/admin/data-delay?symbol_id=&timeframe=` |
+| Security | `GET /api/admin/login-events`, `GET/POST /api/admin/blacklist`, `DELETE /api/admin/blacklist/{id}`, `GET /api/admin/newsletter` |
