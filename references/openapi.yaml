@@ -356,7 +356,9 @@ paths:
               schema: { $ref: "#/components/schemas/Job" }
         "403":
           description: >-
-            The concurrent-job quota is full. (Live trading itself is not plan-gated.)
+            The concurrent-job quota is full, or a multi-symbol basket (`symbols` with ≥2 entries)
+            was requested on the free plan — baskets are Pro and above. Live trading itself is not
+            plan-gated.
 
   /api/v1/jobs/{id}:
     parameters:
@@ -605,7 +607,7 @@ paths:
       tags: [Brokers]
       summary: Connect a Bitstamp account (API key + secret).
       description: >-
-        Bitstamp is the one broker connectable over the API — the others are OAuth and must be
+        Bitstamp is connectable over the API (as is a prop-firm account); Saxo is OAuth and must be
         connected in the web UI. The key is verified against Bitstamp before it is stored and
         must carry the "View your transactions" permission (Bitstamp's order status has no fill
         price, so transactions are the only place a bot can learn what it paid). Both key and
@@ -623,6 +625,61 @@ paths:
       operationId: bitstampDisconnect
       tags: [Brokers]
       summary: Disconnect the Bitstamp account.
+      responses:
+        "204": { description: Disconnected. }
+
+  /api/v1/propfirm/firms:
+    get:
+      operationId: listPropFirms
+      tags: [Brokers]
+      summary: The prop firms that can be connected.
+      description: >-
+        Each entry is { id, name, gateway, env } — the firm is data, the gateway (e.g. tradovate)
+        is the code path. Pick an id for POST /api/v1/propfirm/credentials.
+      responses:
+        "200":
+          description: Firms.
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+  /api/v1/propfirm/status:
+    get:
+      operationId: propfirmStatus
+      tags: [Brokers]
+      summary: Prop-firm connection status.
+      description: >-
+        Returns { connected, firm, gateway, env, account }. `env` is "demo" or "live" (the firm's
+        funded capital under its evaluation rules) and is fixed by the firm you connected to.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/propfirm/credentials:
+    post:
+      operationId: propfirmConnect
+      tags: [Brokers]
+      summary: Connect a prop-firm account (login + firm-issued app identity).
+      description: >-
+        Verified against the gateway before anything is stored, so a bad credential fails here
+        rather than at bot launch. The account must have API market data enabled — its absence is
+        failed at connect, because the bot would otherwise die at warmup days later. Note the
+        gateway answers a rejected login with HTTP 200 and an errorText body, and a lockout with a
+        rate-limit penalty rather than a token; both are surfaced as real errors.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PropFirmCredentials" }
+      responses:
+        "204": { description: Connected. }
+        "400": { description: Unknown firm, missing field, rejected login, lockout, or no API market-data entitlement. }
+  /api/v1/propfirm/disconnect:
+    delete:
+      operationId: propfirmDisconnect
+      tags: [Brokers]
+      summary: Disconnect the prop-firm account.
       responses:
         "204": { description: Disconnected. }
 
@@ -861,16 +918,26 @@ components:
       required: [strategy_id, symbol, timeframe]
       properties:
         strategy_id: { type: string, format: uuid }
-        symbol: { type: string }
+        symbol: { type: string, description: "The primary symbol. When `symbols` is sent, this is its first element — it selects the account-level credentials and labels the job." }
+        symbols:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: >-
+            Optional symbol BASKET. Two or more entries launch one bot that trades them all in a
+            single process, on one broker account and one shared timeframe, counting as ONE job
+            against the concurrency quota. Zero or one entry is an ordinary single-symbol bot.
+            Paid plans only (403 on free) and not supported on ibkr, lightspeed or propfirm (400).
         timeframe: { type: string }
         htf_timeframe: { type: string, nullable: true }
+        intrabar_timeframe: { type: string, nullable: true, description: "Intrabar warmup resolution fetched from the broker feed (request.security_lower_tf). Live bots have no stored dataset, so there is no separate data source." }
         execute_orders: { type: boolean, default: true }
         heartbeat_secs: { type: integer, nullable: true }
         auto_restart: { type: boolean, default: false }
         params_override: { $ref: "#/components/schemas/ParamsOverride" }
         broker:
           type: string
-          enum: [saxo, alpaca, ibkr, lightspeed, bitstamp]
+          enum: [saxo, alpaca, ibkr, lightspeed, bitstamp, propfirm]
           default: saxo
           description: >-
             The broker changes what protective orders exist. saxo and alpaca (equity) place a
@@ -879,9 +946,41 @@ components:
             and has NO native stop/TP/OCO at all: it accepts stop_price, answers 200 OK with an
             order id, and creates nothing, so every Bitstamp stop is SYNTHETIC (bot-side, bar
             close, on a 24/7 market) and spot is long-only. lightspeed and ibkr send market
-            orders only — nothing rests, nothing protects.
+            orders only — nothing rests, nothing protects. propfirm is CME futures through the
+            firm's gateway: live-only (no data source, no backtest path), it trades the front
+            month resolved at launch and never rolls, and the firm's own loss limit / trailing
+            drawdown can flatten and lock the account invisibly to the bot.
         saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's env is fixed when its credentials are saved." }
-        webhook_url: { type: string, nullable: true, description: http/https endpoint for order/trade/fill events. }
+        webhook_url: { type: string, nullable: true, description: http/https endpoint for order/trade/fill events. Ignored under options_routing, where the runner points the webhook at the options runtime. }
+        options_routing:
+          type: boolean
+          default: false
+          description: >-
+            ALPACA ONLY (400 on any other broker). Routes each signal through the options runtime,
+            which scores the underlying shares against the option chain and places whichever
+            expresses the signal best on a risk-adjusted basis. Forces execute_orders=false — the
+            runtime places every order, so a bot that also traded would open both the shares and
+            the contracts for one signal. Best for fast directional strategies; on a slow or
+            mean-reverting one the premium decays while it waits for an exit signal.
+        options_params:
+          $ref: "#/components/schemas/OptionsRoutingParams"
+
+    OptionsRoutingParams:
+      type: object
+      nullable: true
+      description: >-
+        Per-bot options-routing knobs. Every field is optional and an unset field means "use the
+        runtime default", never zero. Ignored (silently dropped) unless options_routing is true.
+        Values are CLAMPED rather than rejected, and min_dte/max_dte are swapped if sent inverted.
+      properties:
+        capital: { type: number, nullable: true, description: "Cash the model may deploy per signal. Clamped to 1 … 10000000." }
+        risk_frac: { type: number, nullable: true, description: "Fraction of capital allowed to be lost on the stop — this is what sizes the position. Clamped to 0.0001 … 1." }
+        min_dte: { type: integer, nullable: true, description: "Earliest expiry the chain search considers, in days. Clamped to 1 … 730 — the floor of 1 makes same-day (0DTE) contracts unreachable by design." }
+        max_dte: { type: integer, nullable: true, description: "Latest expiry considered, in days. Clamped to 1 … 730." }
+        horizon_days: { type: number, nullable: true, description: "Expected holding period; drives which expiry wins the scoring. Clamped to 0.5 … 730." }
+        allow_short: { type: boolean, nullable: true, description: "Open a short expression when a sell signal arrives with nothing held." }
+        dry_run: { type: boolean, nullable: true, description: "Score and log the decision, place nothing." }
+        auto_roll: { type: boolean, nullable: true, description: "Roll a held option to a later expiry before it decays to nothing. Defaults ON: the strategy reasons in the underlying's price and is blind to expiry, so a sideways market with no exit signal would otherwise let the position expire." }
     Job:
       type: object
       properties:
@@ -926,6 +1025,16 @@ components:
           type: string
           enum: [sandbox, live]
           description: sandbox = demo funds (this venue's only paper mode). live = REAL MONEY.
+    PropFirmCredentials:
+      type: object
+      required: [firm_id, username, password, app_id, cid, sec]
+      properties:
+        firm_id: { type: string, format: uuid, description: From GET /api/v1/propfirm/firms. }
+        username: { type: string, description: Your gateway login. }
+        password: { type: string }
+        app_id: { type: string, description: Issued BY THE FIRM together with the account — PineconeX mints nothing. }
+        cid: { type: string, description: Issued by the firm with the account. }
+        sec: { type: string, description: Issued by the firm with the account. }
     CatalogEntry:
       type: object
       properties:
