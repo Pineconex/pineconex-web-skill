@@ -100,7 +100,7 @@ The `jobs` rows themselves are **kept**. Self-deletion is refused
 
 ## Plans and settings
 
-### GET /api/admin/settings → the twelve platform settings
+### GET /api/admin/settings → the thirteen platform settings
 ```
 support_telegram        string   ("")
 banner_message          string   ("")   — shown site-wide to every user
@@ -114,11 +114,23 @@ parquet_retention_days  int      (90)   — 0 disables the retention watchdog
 job_log_max_mb          int      (10)   — 0 = uncapped
 backtest_timeout_secs   int      (600)  — 0 = no timeout
 sweep_timeout_secs      int      (1800) — also applies to robustness; 0 = no timeout
+saxo_split_adjust       bool     (false) — back-adjust Saxo bars for splits at fetch time
 ```
 (Defaults in brackets, used when the key is absent or unparseable.)
 
+**`saxo_split_adjust` changes what every future backtest sees, and does not rewrite the past.**
+Saxo is the only unadjusted source in the fleet — its `/chart/v3/charts` takes no adjustment
+parameter, so an unadjusted 1D series carries the raw split cliff (our ADS series jumps +290% on
+adidas' 2006 split date), which an optimizer will happily report as edge. Massive, Alpaca and Yahoo
+all return adjusted prices, so the same strategy behaves differently depending on where its bars
+came from. It is **off by default** because flipping it changes the numbers. Existing Parquet is
+**not** rewritten: there is one catalog row per (symbol, source, timeframe), so a re-fetch
+overwrites the file in place and `data_catalog.split_adjusted` — surfaced to users as
+`JobResponse.data_split_adjusted` — is the only record of which series a given result was computed
+on. Flip it, then re-fetch the Saxo datasets you care about.
+
 ### PATCH /api/admin/settings → `204`
-**All twelve fields are required** — this is a whole-form replace, and a partial body is rejected
+**All thirteen fields are required** — this is a whole-form replace, and a partial body is rejected
 `422`. `GET` first, mutate, send it all back. No range validation is performed: a zero or negative
 value is stored as given, and the three `0`-means-disabled cases above are the intended use of that.
 
@@ -148,6 +160,16 @@ optional — **and on PATCH, optional means "set to NULL if absent"** (see the w
 Defaults on an absent field: `saxo_asset_type` → `"Stock"`, `enabled` → `true`.
 `bitstamp_pair` is trimmed and **lowercased** (Bitstamp's OHLC path is case-sensitive: `btceur`
 works, `BTCEUR` 404s); an empty string becomes NULL.
+
+**`live_tradable` is NOT settable here.** It is a symbol column (surfaced to users on
+`GET /api/v1/data/symbols`) marking a row as *data-only*: a cash index has a price series but is
+not an instrument anyone can hold, so it backtests and sweeps while live launch refuses it with a
+`400` naming a tracking ETF instead. The admin write path neither reads nor clears it, so a PATCH
+cannot flip a data-only row tradable by accident — it is set in a migration alongside the reason.
+That separation exists because populating a broker id (`saxo_uic` + `saxo_asset_type`) is what
+makes a symbol *tradable*, and index rows are mapped at the broker's leveraged **index CFD** purely
+to get bars. **When adding a symbol for its data only, ship it with `live_tradable = FALSE` in the
+same change.**
 
 ### DELETE /api/admin/symbols/{id} → `204` (`404` if unknown)
 

@@ -97,6 +97,14 @@ in their shared list). Owner only.
 Request: `{ "strategy_id": uuid }`.
 Response: `{ "status": "valid"|"invalid", "errors": [string], "warnings": [string] }`.
 
+**Validation runs the same engine the job would.** The effective runtime is resolved exactly as
+dispatch resolves it — an explicit `//@runtime=<version>` pin if present, otherwise the
+admin-promoted default — so a pinned strategy is checked by *that* engine rather than by whatever
+the API host happens to carry. If an explicit pin cannot be honoured you get a **warning** saying
+so (and the validation still runs on the fallback); an unpinned strategy never warns, because the
+caller expressed no preference and there is nothing to act on. Rate-limited to ~20/min per user
+(`429`).
+
 ---
 
 ## ML models — **Premium plan or higher**
@@ -158,7 +166,16 @@ finished_at    datetime | null
 progress_done  int | null        (sweep/robustness)
 progress_total int | null
 error_message  string | null
+data_split_adjusted  bool | null  (provenance of the bars this job ran on — see below)
 ```
+
+**`data_split_adjusted` is provenance, and `null` is not `false`.** `true` = the bars were
+split-back-adjusted, `false` = raw as the vendor served them, `null` = **unknown**: no dataset was
+bound (live bots), the series came from outside the catalog, or the job predates the field. There
+is one catalog row per (symbol, source, timeframe), so a re-fetch under a different adjustment
+setting overwrites the Parquet in place — two runs of the *same* backtest can then legitimately
+disagree, and this field is the only record of which series each one saw. When comparing results
+across jobs, compare this first. Never render `null` as "raw".
 
 Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`, `running`.
 
@@ -176,6 +193,16 @@ htf_data_source       string  optional
 intrabar_timeframe    string  optional   (request.security_lower_tf)
 intrabar_data_source  string  optional
 ```
+
+**`intrabar_timeframe` is also what makes `use_bar_magnifier` do anything.** A strategy declaring
+`strategy(use_bar_magnifier = true)` resolves a bar that touches **both** a resting stop and a
+resting take-profit by walking the intrabar sub-bars and booking whichever leg price reached first
+(a sub-bar touching both is itself ambiguous → the stop wins). Without an intrabar series the flag
+is a **silent no-op** on backtest and sweep — the run succeeds, logs a warning, and keeps the
+optimistic default of booking the take-profit. Robustness and stress need no series: their
+permuted bars resolve the same tie deterministically from the bar's own OHLC (Brownian bridge), so
+the p-value stays reproducible. Expect a magnified run to score *worse* — the bias is what was
+removed.
 
 **`from_date` / `to_date` gate TRADES, they do not slice the data.** The strategy is executed
 over the whole stored series so indicators warm up correctly (a 200-bar EMA is already
@@ -383,7 +410,10 @@ concurrent-job quota as everything else (free 1, higher tiers more), so a `403` 
 quota is full, not that the plan is too low.
 ```
 strategy_id         uuid    required  (must be validated — `status: "valid"` — or 400)
-symbol              string  required
+symbol              string  required  (the primary symbol; with `symbols`, its first element)
+symbols             array   optional  (string[]; ≥2 entries = a multi-symbol BASKET traded by one
+                                       bot in one process — see below. 0/1 entries = ordinary
+                                       single-symbol bot)
 timeframe           string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no
                                        weekly/monthly/1m. "1H"→60m and "4H"→240m are aliased,
                                        but 240m is not in the live subset, so 1D/90m/60m/30m/
@@ -394,13 +424,51 @@ execute_orders      bool    optional  (default true; false = signals + webhooks,
 heartbeat_secs      int     optional
 auto_restart        bool    optional  (default false)
 params_override     object  optional  { var_name: number|bool }
-broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp")
+broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp"
+                                       |"propfirm")
 saxo_env            string  optional  ("sim"|"live"; Saxo only)
 webhook_url         string  optional  (http/https; receives order/trade/fill events)
+options_routing     bool    optional  (default false; ALPACA ONLY — see below)
+options_params      object  optional  (per-bot options knobs; ignored unless options_routing)
 ```
 
 `broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
-`400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp`.
+`400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp, propfirm`.
+
+**Multi-symbol baskets (`symbols`) are a paid-plan feature.** Two or more entries launch a single
+`LiveMulti` job: one container, one process, one broker account, one shared timeframe, counting as
+**one** job against the concurrency quota. Constraints, all enforced server-side (the UI toggle is
+cosmetic):
+
+- **`403`** on the free plan — pro / premium / admin only.
+- **`400 "multi-symbol live is not supported for <broker>"`** on `ibkr` (per-symbol client id),
+  `lightspeed` (a separate bot binary) and `propfirm` (a futures basket is a basket of contract
+  months, each with its own front-month resolution — not exercised yet).
+- Every entry is a `tv_symbol` that must exist, be enabled, and be `live_tradable`; unknown or
+  data-only rows are rejected `400`.
+
+**`options_routing` hands execution to the options runtime (Alpaca only).** Each signal is scored
+across the underlying shares and the option chain and the better risk-adjusted expression is
+placed. It is refused `400` on any other broker ("no other broker's option order model has been
+verified"), and it **forces `execute_orders = false`** — the runtime places every order, so a bot
+that also traded would open the shares *and* the contracts for one signal. Under routing the
+runner owns the webhook URL, so a client-supplied `webhook_url` does not reach the runtime.
+
+`options_params` (every field optional; an unset field means "use the runtime default", never 0):
+```
+capital       number  cash the model may deploy per signal      (clamped 1 … 10,000,000)
+risk_frac     number  fraction of capital risked to the stop    (clamped 0.0001 … 1)
+min_dte       int     earliest expiry considered, in days       (clamped 1 … 730 — never 0DTE)
+max_dte       int     latest expiry considered, in days         (clamped 1 … 730)
+horizon_days  number  expected holding period, drives expiry    (clamped 0.5 … 730)
+allow_short   bool    open a short expression on a sell signal
+dry_run       bool    score and log the decision, place nothing
+auto_roll     bool    roll a held option to a later expiry before it decays (default ON)
+```
+Values are clamped, not rejected, and `min_dte`/`max_dte` are swapped if sent out of order. A
+`options_params` blob on a non-routed job is silently dropped. Options routing suits fast
+directional strategies; on a slow or mean-reverting one the premium decays while it waits for an
+exit signal — say so before launching one for a user.
 
 Errors specific to this endpoint: `429` if you exceed 30 launches/min; `400 "Concurrent job limit
 reached (N)…"` when the plan's quota is full; `400 "<Broker> not connected: …"` when the broker
@@ -417,6 +485,7 @@ every venue; the order model underneath is not, and the difference is not guessa
 | **Bitstamp** (spot) | USD + EUR spot pairs (iff `bitstamp_pair` is non-null) | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
+| **PropFirm** | CME futures, through the firm's gateway (Tradovate) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot trades the **front month resolved at launch and does not roll** — stop and relaunch before expiry. The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. |
 
 Bitstamp has **no `env` field on the launch request** — the environment (`sandbox` = the venue's
 only paper mode, or `live` = real money) is fixed when the credentials are saved. Check it with
@@ -451,6 +520,12 @@ optimizer had already disqualified.
 accepted as a `?token=` query parameter (that path is reserved for the web UI's short-lived session
 token, since browser `EventSource` can't set headers).
 ### DELETE /api/v1/jobs/{id} — stop/cancel (live: soft-cancel kept in history; batch: hard delete)
+**Stopping a live bot cancels its resting orders; it does not close the position.** On shutdown the
+bot cancels the entry and exit orders it left at the broker (an unmanaged resting stop is a hazard:
+a stop-loss is a sell, and a sell with no position behind it can *open a short*). Whatever is held
+is left alone and named in the log as unprotected — closing it is the user's call, in their broker.
+Relaunching re-adopts and re-protects the position. Never tell a user that stopping the bot
+flattened them.
 ### POST /api/v1/jobs/{id}/analyse — AI (descriptive) analysis of results
 Request: `{ "provider": "gemini"|"mistral"|null }` (null = the server default; see
 `GET /api/ai/providers`). The job must be `completed`.
@@ -477,7 +552,7 @@ A source can only serve a symbol it has a ticker for — the per-symbol tickers 
 | `yahoo` | Equities + crypto | Default, no account needed. **Refuses any intraday range older than 730 days.** |
 | `saxo` | EU + US equities | Needs a connected Saxo account. `saxo_uic` must be non-null (crypto has none). |
 | `alpaca` | US equities + US-dollar crypto pairs | Needs a connected Alpaca account. Crypto history **starts 2021-01-01**. |
-| `massive` | Broad market data | — |
+| `massive` | US equities (a 10-year window on our plan) | Also the source behind Pine's `request.financial` fundamentals and the corporate-action series; Yahoo is merged in as a second fundamentals source per series. Server-side rate-limited, so a long intraday range is paced across many paged calls — a fetch can take minutes without anything being wrong. Vendor rejections are surfaced verbatim rather than as a generic failure. |
 | `ibkr` | Equities | Needs IBKR configured (TWS/Gateway). |
 | `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
 
@@ -488,10 +563,21 @@ Bitcoin backtest — the window the MCPT literature uses — is only reproducibl
 
 ### GET /api/v1/data/symbols → array
 ```
-id, tv_symbol, display_name, index_name,
+id, tv_symbol, tv_full_symbol, display_name, index_name,
 yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null,
-saxo_uic|null, bitstamp_pair|null
+saxo_uic|null, bitstamp_pair|null,
+live_tradable  bool,
+strategy_profile  string|null
 ```
+
+**`live_tradable = false` means data-only.** A cash index (DAX 40, CAC 40, …) has a price series
+but is not an instrument anyone can hold, so it backtests and sweeps normally and is refused at
+live launch: `400 "<sym> is a data-only symbol — an index level, not an instrument you can hold.
+… Trade a tracking ETF instead (e.g. DAXEX or DBXD for the DAX, CACC for the CAC 40)."` Check the
+flag before offering a symbol for a live bot; the same rejection applies to every entry of a
+`symbols` basket. (This is deliberate: those rows are mapped at the broker's *index CFD* for their
+bars, so treating them as tradable would have opened a leveraged CFD position from a strategy
+backtested on the unleveraged cash index.)
 Crypto lives under `index_name` **"Crypto (USD)"** / **"Crypto (EUR)"**; `tv_symbol` is the
 pairless form (`BTCUSD`, `ETHEUR`). The per-broker tickers differ and are **not**
 interchangeable — `BTC-USD` (Yahoo) vs `BTC/USD` (Alpaca) vs `btcusd` (Bitstamp) — but you
@@ -544,6 +630,7 @@ that is persisted.
 | **Alpaca** | yes | `POST /alpaca/keys` — key id + secret (the OAuth flow is browser-only) |
 | **Lightspeed** | yes | `POST /lightspeed/credentials` |
 | **IBKR** | yes | `POST /ibkr/settings` — host/port of your own TWS or Gateway |
+| **Prop firm** | yes | `POST /propfirm/credentials` — firm id + login + the app id/cid/secret the firm issued |
 | **Saxo** | **no** | OAuth + PKCE redirect; must be completed in the web UI |
 
 ### Saxo — `GET /api/v1/saxo/status`
@@ -627,6 +714,39 @@ host is SSRF-guarded: loopback, RFC1918 and link-local addresses are refused
 each live bot is assigned `base+1` upward, skipping ids already in use by your running jobs.
 `GET /api/v1/ibkr/status` → `{ connected, host, port, client_id }`.
 `DELETE /api/v1/ibkr/disconnect` → `204`.
+
+### Prop firm — `GET /api/v1/propfirm/firms` → array
+```
+id       uuid
+name     string   (the firm, e.g. "Apex")
+gateway  string   ("tradovate")
+env      string   ("demo"|"live")
+```
+The firm is **data**, the gateway is code: onboarding a new firm is a row, not a release. Pick an
+`id` from this list for the connect call.
+
+### POST /api/v1/propfirm/credentials → `204`
+```
+firm_id   uuid    required  (from /propfirm/firms)
+username  string  required  (your gateway login)
+password  string  required
+app_id    string  required  \
+cid       string  required   > issued BY THE FIRM together with the account — we mint nothing
+sec       string  required  /
+```
+Verified against the venue before anything is stored, so a bad credential fails here rather than
+at bot launch. Two failure modes that do not look like failures are handled for you: a rejected
+login answers **HTTP 200** with an `errorText` body, and too many attempts answers 200 with a
+rate-limit penalty rather than a token (that is a lockout, not a wrong password). The account must
+have **API market data enabled** — its absence is failed at connect, because otherwise no bars can
+be fetched and the bot would die at warmup days later.
+
+`GET /api/v1/propfirm/status` → `{ connected, firm, gateway, env, account }`.
+`DELETE /api/v1/propfirm/disconnect` → `204`.
+
+**Live trading only.** There is no `propfirm` data source: gateway market data is entitled per
+account and non-redistributable, so it is never cached into the shared catalog. Backtest a futures
+strategy from another source, then trade it here.
 
 **IBKR Web API (OAuth) is a stub pending IBKR onboarding.** `GET /api/v1/ibkr/web/status` always
 returns `{ "connected": false, "account_id": null }` and `POST /api/v1/ibkr/web/connect` always

@@ -143,9 +143,10 @@ Two related things worth telling users:
 
 1. Confirm with the user (broker, symbol, paper vs. live).
 2. Ensure the broker is connected: `auth "$PINECONEX_API_URL/api/v1/alpaca/status"` (or `saxo`,
-   `ibkr`, `lightspeed`, `bitstamp`). If not connected, the user must connect it in the web UI
-   (OAuth) — except **Bitstamp**, which takes an API key and can be connected over the API
-   (`POST /api/v1/bitstamp/credentials`).
+   `ibkr`, `lightspeed`, `bitstamp`, `propfirm`). If not connected, the user must connect it in the
+   web UI (OAuth) — except **Bitstamp** and **prop-firm** accounts, which take credentials and can
+   be connected over the API (`POST /api/v1/bitstamp/credentials`,
+   `POST /api/v1/propfirm/credentials`).
 3. Launch:
    ```bash
    auth -X POST "$PINECONEX_API_URL/api/v1/jobs/live" \
@@ -156,6 +157,32 @@ Two related things worth telling users:
    ```
 4. Monitor: `GET /api/v1/jobs/<id>` for status, `GET /api/v1/jobs/<id>/logs` (SSE — stream it with the
    `Authorization: Bearer` header, e.g. `curl -N`). Stop with `DELETE /api/v1/jobs/<id>`.
+
+**Stopping is not flattening.** `DELETE` cancels the bot's resting orders and leaves the position
+open at the broker — nothing in the platform closes a position. If the user wants out of the
+market, they must do it in their broker's own interface. Say so plainly rather than implying the
+stop got them flat.
+
+**Three launch options worth raising, because users don't know they exist:**
+* **`symbols`: a basket in one bot.** Two or more entries trade the whole basket in one process on
+  one shared timeframe, counting as **one** job against the quota. **Pro plan and above** (`403` on
+  free), and not available on `ibkr`, `lightspeed` or `propfirm` (`400`). One bot per symbol is
+  still the more controllable shape — each has its own log, position and stop.
+* **`options_routing`: let a model pick shares, calls or puts per signal.** **Alpaca only** (`400`
+  elsewhere), and it forces `execute_orders=false` because the options runtime places every order.
+  Tune it per bot with `options_params` (`capital`, `risk_frac`, `min_dte`/`max_dte` — floored at 1,
+  so 0DTE is unreachable — `horizon_days`, `allow_short`, `dry_run`, `auto_roll` which defaults on).
+  Only suggest it for fast directional strategies: on a slow or mean-reverting one the premium
+  decays to nothing while it waits for an exit signal, where the shares would have sat flat.
+  `dry_run: true` scores and logs without placing — the honest first step.
+* **`execute_orders: false`** — signals and webhooks, no broker orders. The way to watch a strategy
+  live without risking anything.
+
+**Prop-firm futures (`broker: "propfirm"`) is live-only and unusually sharp.** The firm's daily
+loss limit, trailing drawdown and flat-by time are enforced on the *firm's* side and are invisible
+to the bot — a breach flattens every position and locks the account mid-session. The bot also
+trades the **front month resolved at launch and never rolls**: it must be stopped and relaunched
+before expiry. There is no `propfirm` data source, so backtest from another source.
 
 ## Crypto and Bitstamp
 
@@ -191,7 +218,7 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
-| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `DELETE /api/v1/{…}/disconnect` |
+| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
 | GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |
 | Account | `GET/PATCH/DELETE /api/v1/auth/me`, `POST /api/v1/auth/telegram/test`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
 
@@ -222,6 +249,18 @@ Strategy `code` is **Pine Script v6 for the PineconeX headless interpreter**, wh
 TradingView (chart/UI calls are silently ignored; alert primitives are repurposed). If you are
 authoring or editing the Pine source itself, prefer the dedicated Pine authoring guidance rather
 than assuming TradingView semantics.
+
+Two `strategy()` arguments have API-side consequences worth knowing:
+
+* **`use_bar_magnifier = true`** resolves a bar that touches both the stop and the take-profit from
+  finer data instead of optimistically booking the take-profit — but on backtest and sweep it needs
+  an **`intrabar_timeframe`** on the request. Without one it is a silent no-op (warning in the log).
+  Robustness and stress need no series. Magnified runs score lower; that is the bias leaving.
+* **`margin_long` / `margin_short` default to 100** — full cash cover, no leverage — and an entry
+  the account cannot pay for is not opened. So `default_qty_type=strategy.percent_of_equity` with a
+  value above 100 no longer silently borrows. Leverage must be asked for explicitly (`margin_long =
+  25` is 4×). This applies to the backtest engine too, so results changed for scripts that were
+  implicitly over-leveraging.
 
 Two **PineconeX-exclusive namespaces** have no TradingView equivalent, so a plain Pine generator
 won't know them:
@@ -277,7 +316,7 @@ infrastructure, and several calls are not undoable by any subsequent call.
   written as `NULL`. Always `GET /api/admin/symbols`, edit the one object, and send the whole thing
   back. A sparse PATCH silently erases every ticker mapping you left out.
   (`/runners`, `/vps` and `/runtime-versions` *are* partial; `PATCH /api/admin/settings` requires
-  **all twelve** fields or it is rejected `422`. Three endpoints, three semantics — check, don't
+  **all thirteen** fields or it is rejected `422`. Three endpoints, three semantics — check, don't
   assume.)
 - **A `204` is not proof anything existed.** `DELETE /runners/{id}`, `DELETE /vps/{id}`,
   `DELETE /runtime-versions/{v}` and `PATCH /vps/{id}` all return success for ids that never
@@ -319,7 +358,7 @@ crash rate is ≈0 no matter how bad their code. A high `fail_ratio` alone is ju
 | Area | Endpoints |
 |---|---|
 | Users | `GET /api/admin/users`, `PATCH /api/admin/users/{id}/plan`, `DELETE /api/admin/users/{id}` |
-| Settings | `GET/PATCH /api/admin/settings` (all twelve fields required on PATCH) |
+| Settings | `GET/PATCH /api/admin/settings` (all thirteen fields required on PATCH) |
 | Symbols | `GET/POST /api/admin/symbols`, `PATCH/DELETE /api/admin/symbols/{id}`, `POST /api/admin/symbols/refresh-ticks` |
 | Options / GEX | `GET/POST /api/admin/options-overrides`, `DELETE /api/admin/options-overrides?tv_symbol=`, `GET /api/admin/gex/preview` |
 | Fleet | `GET/POST /api/admin/runners`, `PATCH/DELETE /api/admin/runners/{id}` |
