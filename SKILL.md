@@ -84,8 +84,23 @@ Sweeps (`/api/v1/jobs/sweep`), robustness (`/api/v1/jobs/robustness`) and stress
 permutation (Monte Carlo significance) test — it returns a `p_value` on whether the strategy's
 edge is real price structure or luck (low = real), plus `hurst`/`variance_ratio` describing the
 instrument. Stress maps where a config *breaks* across synthetic markets — it is neither an
-optimizer nor a significance test. Robustness and stress require a **Premium** plan.
+optimizer nor a significance test. Its `model` chooses the family of markets to sweep
+(`ou_jump` mean-reverting, `trend_ar1` momentum, `both` a signed axis through a random walk,
+`auto` to measure the instrument and pick); the results report which family the instrument is
+actually in as `calibration.family`, and reading the grid without it can describe a market the
+instrument is not in. Stress takes two separate scoring settings: `metric` scores each path,
+while `survival` (default `net_pnl_pct > 0`, e.g. `net_pnl_pct > 0 and max_dd_pct < 20`) is the
+pass-or-fail line behind `frac_profitable` — so on a non-default criterion that layer is not a
+count of profitable paths, and the results echo the criterion. Robustness and stress require a
+**Premium** plan.
 See `references/api-reference.md` for their request fields.
+
+**Portfolio (book) jobs.** `/api/v1/jobs/portfolio-backtest` runs ONE strategy across N symbols
+against ONE shared account, and `/api/v1/jobs/portfolio-sweep` sweeps its `//@sweep` inputs the same
+way (each trial is a full book run). Both take the strategy's own `request.security` basket as the
+universe, so they have **no `symbol` field** — instead `initial_capital` and `leverage` configure
+the shared book. portfolio-sweep uses the same `mode`/`trials`/`metric`/`min_trades` as `/sweep`
+(no `perm_seed`). Available on every plan; see `references/api-reference.md`.
 
 **Sweep modes are `grid`, `random`, `rbf`.** `bayesian` and `monte_carlo` were removed 2026-07-13
 after failing a blind-random control at equal budget (monte_carlo scored *worse* than random;
@@ -128,6 +143,33 @@ It re-runs that optimizer inside every permutation, so the null becomes *"the be
 strategy family can be fitted to noise"*. Cost scales with it (`fixed` = 1 backtest per
 permutation, `grid` = the whole grid), and `permutations x search size` is capped — over the limit
 you get a 400 with the number.
+
+**The other p-value trap: do not set `block_size` unless you mean it.** Permutation is exact only
+if the bars are **exchangeable**, and serial dependence breaks that. `block_size` defaults to
+`"auto"`, which measures the series being permuted and sizes the block from it — so **leave it
+alone**. It is a property of the instrument, not a preference, and a number you pick is a number
+you guessed.
+
+```
+POST /api/v1/jobs/robustness   { ... }                        # auto: correct by default
+POST /api/v1/jobs/robustness   { ..., "block_size": 5 }        # explicit override, honoured as-is
+GET  /api/v1/data/structure?symbol=…&timeframe=…&data_source=…  # inspect an instrument directly
+```
+
+Results always report the **resolved** `block_size` plus `block_auto`, `suggested_block` and a
+plain-English `block_advice`. A resolved block of 1 means the series has no measurable return
+memory, so single-bar permutation **is** the correct and strictest null — it is not a fallback and
+must not be "upgraded" to a block. If you do override and shuffle smaller than the data implies, the
+permutations destroy structure the market really has, the null becomes an easier opponent than
+reality, and the `p_value` is **optimistically biased** — significance the strategy did not earn.
+Compare `block_size` against `suggested_block` before reporting any p-value, and say so when they
+disagree.
+
+Volatility clustering is a **separate axis** and is deliberately not allowed to size the block
+(it runs for hundreds of lags, which would leave too few blocks to shuffle). A series can have no
+return memory at all while volatility clusters for dozens of bars: irrelevant to a directional
+edge, but for a volatility edge — breakout, ATR sizing, vol filters — a block below
+`vol_acf_decay_lag` leaves the null a calmer market than the real one.
 
 Two related things worth telling users:
 * **Out-of-sample needs no special mode** — it is a date range. Sweep on the training window, then
@@ -213,7 +255,7 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
 | Validate | `POST /api/v1/validate` |
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
-| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `POST /api/v1/data/fetch` |
+| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
 | GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |

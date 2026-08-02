@@ -286,6 +286,48 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
 
+  /api/v1/jobs/portfolio-backtest:
+    post:
+      operationId: launchPortfolioBacktest
+      tags: [Jobs]
+      summary: Launch a portfolio (shared-account book) backtest.
+      description: >-
+        One strategy run across N symbols against ONE shared account. The universe is the
+        strategy's own request.security basket (array.from(...)), so there is no symbol field.
+        400 if the universe resolves to fewer than 2 tradable legs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PortfolioBacktestRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
+  /api/v1/jobs/portfolio-sweep:
+    post:
+      operationId: launchPortfolioSweep
+      tags: [Jobs]
+      summary: Launch a portfolio (shared-account book) parameter sweep.
+      description: >-
+        Sweep a strategy's //@sweep inputs while it runs across the shared-account book. Each
+        trial is a full book run; results are the same SweepResults shape as /jobs/sweep. 400 if
+        the strategy has no //@sweep parameters or its universe resolves to fewer than 2 legs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PortfolioSweepRequest" }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+
   /api/v1/jobs/robustness:
     post:
       operationId: launchRobustness
@@ -516,6 +558,69 @@ paths:
                 type: object
                 properties:
                   configured: { type: boolean }
+
+  /api/v1/data/structure:
+    get:
+      operationId: dataStructure
+      tags: [Data]
+      summary: Measured serial dependence of a cached dataset, and the permutation block size it implies.
+      description: >-
+        Answers whether shuffling this series is a fair thing to do, and what block size it needs.
+        POST /api/v1/jobs/robustness already does this for you -- its block_size defaults to "auto",
+        which measures the series being permuted -- so this endpoint is for INSPECTING an instrument
+        (before choosing one, or to explain a result), not a required step. A permutation test is
+        only exact if the bars are exchangeable; when suggested_block exceeds the block_size used,
+        the null is an easier market than reality and the p-value is optimistically biased.
+      parameters:
+        - { name: symbol, in: query, required: true, schema: { type: string } }
+        - { name: timeframe, in: query, required: true, schema: { type: string } }
+        - { name: data_source, in: query, required: true, schema: { type: string } }
+        - { name: from_date, in: query, required: false, schema: { type: string, format: date } }
+        - { name: to_date, in: query, required: false, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Serial-dependence measurement.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bars: { type: integer, description: Bars measured, after the date gate. }
+                  acf:
+                    type: array
+                    items: { type: number }
+                    description: Return autocorrelation at lags 1..N.
+                  acf_band:
+                    type: array
+                    items: { type: number }
+                    description: >-
+                      Per-lag 95% band, robust to volatility clustering (which otherwise inflates
+                      the ACF's sampling variance and invents dependence that is not there).
+                  acf_band_nominal:
+                    type: number
+                    description: The textbook 1.96/sqrt(n); its gap to acf_band[0] shows how heteroskedastic the series is.
+                  acf_abs:
+                    type: array
+                    items: { type: number }
+                    description: Autocorrelation of |returns| — volatility clustering.
+                  acf_abs_band: { type: number }
+                  acf_lag1: { type: number }
+                  acf_lag1_significant: { type: boolean }
+                  vol_acf_lag1: { type: number }
+                  vol_acf_lag1_significant: { type: boolean }
+                  acf_decay_lag:
+                    type: integer
+                    nullable: true
+                    description: Lag from which the ACF stays inside its band; null = dependence outruns the measurable window.
+                  vol_acf_decay_lag: { type: integer, nullable: true }
+                  suggested_block:
+                    type: integer
+                    description: >-
+                      Block size the measurement implies. 1 means no detectable return memory, so
+                      single-bar permutation is the correct and strictest null — not a fallback.
+                  summary: { type: string, description: One-line plain-English verdict. }
+        "400":
+          description: Dataset is not cached — fetch it first.
 
   /api/v1/data/fetch:
     post:
@@ -885,6 +990,36 @@ components:
             min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never win — not in the search, not in the results ranking. 0..1000; 0 disables. This is what makes the non-PnL objectives safe: profit factor of a config that never trades is +inf (no losses) and win rate of one lucky trade is 100%, so with no floor a PF or win-rate search converges on a strategy that refuses to trade." }
             perm_seed: { type: integer, nullable: true, description: "Sweep a bar-PERMUTED copy of the series instead of the real bars. A permutation is fully determined by its seed, so re-submitting the same sweep under N seeds builds a null distribution of the best-of-search score — an in-sample Monte Carlo permutation test. No bars cross the wire. Rejected (400) with intrabar_timeframe." }
             perm_block: { type: integer, default: 1, description: "Permutation block size in bars (1..1000). 1 = single-bar. Ignored unless perm_seed is set." }
+    CommonBookRequest:
+      type: object
+      required: [strategy_id, timeframe, from_date, to_date, data_source]
+      description: "Fields common to the portfolio (book) jobs. The universe is the strategy's own request.security basket, so there is NO symbol field — initial_capital and leverage configure the one shared account instead."
+      properties:
+        strategy_id: { type: string, format: uuid }
+        timeframe: { type: string, example: "1D", description: "1D, 1W, 240m, 60m, 30m, 15m, 5m" }
+        from_date: { type: string, format: date }
+        to_date: { type: string, format: date }
+        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp] }
+        initial_capital: { type: number, default: 100000, description: "Shared book account size. percent_of_equity sizing is a share of the whole book, not per symbol." }
+        leverage: { type: number, default: 2.0, description: "Gross-exposure cap as a multiple of book equity (Sum|leg notional| <= leverage x equity). 2.0 = full long + full short (dollar-neutral); 1.0 caps total exposure at the account size." }
+    PortfolioBacktestRequest:
+      description: "One strategy across N symbols against one shared account. 400 if the universe resolves to fewer than 2 tradable legs. Results add a legs[] per-symbol contribution array."
+      allOf:
+        - $ref: "#/components/schemas/CommonBookRequest"
+        - type: object
+          properties:
+            params_override: { $ref: "#/components/schemas/ParamsOverride" }
+    PortfolioSweepRequest:
+      description: "Sweep a strategy's //@sweep inputs across the shared-account book; each trial is a full book run. Same SweepResults shape as /jobs/sweep. No perm_seed/perm_block (in-sample permutation is single-instrument only)."
+      allOf:
+        - $ref: "#/components/schemas/CommonBookRequest"
+        - type: object
+          required: [mode]
+          properties:
+            mode: { type: string, enum: [grid, random, rbf] }
+            trials: { type: integer, nullable: true, description: "random samples / rbf budget. Grid derives its count from minval/maxval/step." }
+            metric: { type: string, default: net_pnl_pct, description: "The rbf objective — same set as the sweep metric, including a custom 'expr: <formula>'. Only rbf steers; grid/random ignore it." }
+            min_trades: { type: integer, default: 5, description: "Book-wide closed-trade floor (0..1000; 0 disables). A trial below it can never win." }
     RobustnessRequest:
       allOf:
         - $ref: "#/components/schemas/CommonJobRequest"
@@ -893,7 +1028,21 @@ components:
             permutations: { type: integer, default: 200, description: Null-distribution size (1..2000). }
             metric: { type: string, default: net_pnl_pct, description: "BOTH the statistic the p-value is computed on AND the objective the search hill-climbs inside every permutation — deliberately the same value. One of net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate — or a custom expression 'expr: <formula>' (same syntax as the sweep metric), maximised as written. An MCPT is only valid when the procedure re-run on permuted bars IS the procedure that ran on the real bars, so a search optimising net PnL while the test reported win rate would be a different procedure and its null would not describe it. Set it to whatever your sweep optimised — including the same expr: formula if the sweep used one. max_dd_pct is NOT accepted (400): every statistic here is higher-is-better, which is what makes the one-sided upper tail correct." }
             min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never be the winner the statistic is read from — applied identically to the real run and to every permutation. 0..1000. With no floor a strategy that takes ZERO trades is a valid winner: its statistic is 0, every shuffled series also scores 0, and the test returns p = 1.0000 about a strategy that never traded." }
-            block_size: { type: integer, default: 1, description: "1 = single-bar permutation (destroys all serial structure); >1 = block permutation (shuffle N-bar chunks, preserving shorter structure). Range 1..1000." }
+            block_size:
+              default: auto
+              description: >-
+                How much of the market's own memory survives into the null. Defaults to "auto",
+                which MEASURES the series being permuted and sizes the block from that -- the right
+                value is a property of the instrument, not a caller preference, so leave it alone
+                unless you have a specific reason. 1 = single-bar permutation (destroys all serial
+                structure); >1 = block permutation (shuffle N-bar chunks, preserving shorter
+                structure), clamped to 1..1000. Results report the resolved integer plus block_auto.
+              oneOf:
+                - type: string
+                  enum: [auto]
+                - type: integer
+                  minimum: 1
+                  maximum: 1000
             seed: { type: integer, nullable: true, description: RNG seed; omit for time-seeded. Effective seed is echoed in results. }
             search_mode: { type: string, enum: [fixed, grid, random, rbf], default: fixed, description: "The selection procedure re-run inside every permutation — this IS the null hypothesis. 'fixed' re-runs the strategy's authored input defaults (one backtest per permutation) and is correct ONLY if the parameters were chosen without looking at the data. If they came from a sweep, 'fixed' is optimistically biased: it cannot see that N candidates were tried, and the best of N noise draws is high by construction. Declare the search you actually used and it is re-run inside every permutation, so the null becomes 'the best score this strategy family can be fitted to noise'. Cost scales with it; permutations x search size is capped (400 over the limit)." }
             search_trials: { type: integer, nullable: true, description: "Candidates per permutation for random/bayesian/rbf. Ignored by fixed and grid." }
@@ -902,14 +1051,15 @@ components:
         - $ref: "#/components/schemas/CommonJobRequest"
         - type: object
           properties:
-            model: { type: string, enum: [ou_jump], default: ou_jump, description: Synthetic market generator. }
+            model: { type: string, enum: [auto, ou_jump, trend_ar1, both], default: ou_jump, description: "Synthetic market generator. ou_jump = mean-reverting (AR(1) on the log price), trend_ar1 = momentum (AR(1) on the log return), both = one signed axis with a random walk at the centre, auto = measure the instrument's family and pick (resolving to both when inconclusive). The results echo the resolved `model` and the `axis_kind` that says what half_life_bars means." }
             half_lives: { type: array, items: { type: number }, description: "X axis: mean-reversion half-lives in bars. Max 12 values. The instrument's own calibrated coordinate is forced onto the grid, so a run is usually one row/column larger than what you pass." }
             jump_rates: { type: array, items: { type: number }, description: "Y axis: jumps per 1000 bars. Max 12 values." }
             paths: { type: integer, default: 20, description: Simulated paths per cell (1..100). }
             jump_sigma: { type: number, description: "0..50" }
             vol_mult: { type: number, description: "0.1..10" }
             bars: { type: integer, description: Bars per synthetic path (100..5000). }
-            metric: { type: string, description: The statistic each cell is scored on. }
+            metric: { type: string, description: "The statistic each cell is scored on, driving the median and mean layers. Not the same setting as `survival`." }
+            survival: { type: string, default: "net_pnl_pct > 0", description: "What counts as a path SURVIVING its cell, driving the frac_profitable layer. Comparisons (>, >=, <, <=) over net_pnl_pct, max_dd_pct (a positive percentage), trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd, joined by `and` (max 4). Both sides may be expressions. Examples: `net_pnl_pct > 0 and max_dd_pct < 20`, `net_pnl_pct > 2 * max_dd_pct`. A count needs a fixed line where a statistic only needs to rank, which is why this is separate from `metric`; it is fixed for the whole run and echoed in the results. Rejected at submit time if it does not parse." }
             seed: { type: integer, nullable: true }
             params_override: { type: object, additionalProperties: true, nullable: true, description: "The config to stress, keyed by input VARIABLE name (not title). Numbers and bools only — strings are rejected (code-injection guard). Send the same override you use for /jobs/backtest and /jobs/live: stress runs one fixed parameter set across every synthetic market, so it should be the set you actually deploy. Unlike sweep and robustness, which deliberately ignore it." }
 
