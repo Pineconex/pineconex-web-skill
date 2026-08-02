@@ -218,6 +218,27 @@ Above fields, plus:
 params_override  object  optional   { var_name: number|bool }  (strings rejected)
 ```
 
+### POST /api/v1/jobs/portfolio-backtest
+One strategy run across N symbols against ONE shared account (a "book"). Every leg runs the same
+per-bar engine as `/backtest`, but all legs transact one ledger: closes credit shared cash,
+`percent_of_equity` sizes off the whole book, and a gross-exposure cap bounds combined long+short.
+The universe is the strategy's OWN `request.security` basket (declared in Pine with
+`array.from("SYM", …)`), so there is **no `symbol` field** — the strategy names the symbols, and
+each leg is also a peer the others rank against. Pair trading is the 2-symbol case. Research /
+backtest only; live trading runs each symbol as its own independent bot.
+
+Common fields EXCEPT `symbol` / `htf_*` / `intrabar_*`, plus:
+```
+initial_capital  number  optional  (shared book account size; default 100000)
+leverage         number  optional  (gross-exposure cap ×equity: Σ|leg notional| ≤ leverage×equity;
+                                    default 2.0 = full long + full short. 1.0 caps total exposure
+                                    at the account size)
+params_override  object  optional  ({ var_name: number|bool }, as /backtest)
+```
+**400 if the strategy's `request.security` universe resolves to fewer than 2 tradable legs.** The
+results add a `legs[]` array (per-symbol trade count and net P&L contribution) on top of the usual
+book summary / equity / trades.
+
 ### POST /api/v1/jobs/sweep
 Above common fields, plus:
 ```
@@ -294,6 +315,25 @@ Rejected with 400 if combined with `intrabar_timeframe` — sub-bar structure ca
 from permuted bars, so intra-bar fills would price against a path that does not exist. The HTF, if
 present, is re-derived by aggregating the permuted primary so the two series stay coherent.
 
+### POST /api/v1/jobs/portfolio-sweep
+Sweep a strategy's `//@sweep` inputs while it runs across the whole book — the same shared-account
+universe as `/portfolio-backtest`. Every trial is a full book run, and results.json is the same
+`SweepResults` shape as `/sweep`, so the same trials table renders it.
+
+Common fields EXCEPT `symbol` / `htf_*` / `intrabar_*`, plus the book fields (`initial_capital`,
+`leverage` — see `/portfolio-backtest`) and the search fields:
+```
+mode        "grid"|"random"|"rbf"   required
+trials      int    optional  (random samples / rbf budget)
+metric      string optional  (rbf objective; same set as /sweep, including "expr: <formula>".
+                              Only rbf steers — grid/random ignore it)
+min_trades  int    optional  (default 5; 0..1000. Book-wide closed-trade floor)
+```
+No `perm_seed` / `perm_block`: in-sample permutation is single-instrument only. Same rules as the
+other sweep and the portfolio backtest apply — **400** if the strategy has no `//@sweep` parameters,
+and **400** if its universe resolves to fewer than 2 tradable legs. Trials run serially (a book run
+is heavier than a single symbol), so keep grids modest on a large universe.
+
 ### POST /api/v1/jobs/robustness
 Permutation (Monte Carlo significance) test: bar-permutes the price series N times,
 re-runs the strategy on each, and reports a p-value on whether the edge is real
@@ -317,10 +357,12 @@ search_trials int     optional  (candidates per permutation for random/rbf.
 min_trades    int     optional  (default 5; 0..1000. A trial with fewer closed trades can
                                   never be the winner the statistic is read from — applied
                                   identically to the real run and to every permutation)
-block_size    int     optional  (default 1; 1..1000. 1 = single-bar permutation
-                                  (destroys all serial structure); >1 = block
-                                  permutation (shuffle N-bar chunks, preserving
-                                  structure shorter than N — a less strict null))
+block_size    "auto"|int optional (default "auto" — MEASURED from the series, see below.
+                                  1 = single-bar permutation (destroys all serial
+                                  structure); >1 = block permutation (shuffle N-bar
+                                  chunks, preserving structure shorter than N — a less
+                                  strict null). An integer is clamped to 1..1000.
+                                  Anything else is a 400)
 seed          int     optional  (RNG seed; omit for a time-seeded run. The effective
                                   seed is echoed back in the results for reproducibility)
 ```
@@ -346,6 +388,41 @@ returns `p = 1.0000` — a confident-looking verdict about a strategy that never
 Results (`GET .../results`) include: `p_value`, `observed_stat`, the `null_dist` array
 (+ mean/sd/percentiles), `hurst` + `variance_ratio` (structure of the price series,
 strategy-independent), and the echoed `permutations`/`block_size`/`metric`/`seed`.
+
+**`block_size` defaults to `"auto"`, and you should almost always leave it there.** The block
+decides how much of the market's own memory survives into the null. That is a property of the
+*instrument*, not a caller preference, and no fixed default is right across instruments — so the
+engine measures the series it is about to permute and sizes the block from that. Resolution happens
+in the engine rather than at the API because only the engine holds the exact bars being shuffled
+(date-gated, warm-up trimmed); sizing it anywhere earlier would measure a different set of bars than
+the one being permuted.
+
+Results always report the **resolved** integer in `block_size`, plus `block_auto: true|false` so a
+reader can tell "auto agreed with itself" from "the caller chose correctly". An explicit integer is
+always honoured, and the measurement is still reported beside it, so an override that contradicts
+the data is visible rather than silent.
+
+One case auto deliberately will not act on: when the dependence outruns the measurable window it
+caps the block and says so, because "we never found the end of the memory" is the weakest evidence
+available, not grounds for shuffling in 60-bar chunks. Override with an explicit integer if you want
+the longer block. (Operators can move the cap with `PERM_AUTO_BLOCK_MAX` on the runner.)
+
+**Serial dependence — check this before trusting the p-value.** The results also carry the
+measured autocorrelation of the series (same fields as `GET /api/v1/data/structure`, plus
+`block_advice`, a one-line plain-English verdict, and `diag_bars`, the bars measured after the
+date gate). A permutation test is only exact if the bars are **exchangeable**, and serial
+dependence breaks that — asymmetrically:
+
+| `suggested_block` vs `block_size` | What it means |
+|---|---|
+| equal | The null matched the series. Read `p_value` at face value. |
+| **suggested > used** | The permutations destroyed structure the market really has, so the null is an **easier** opponent than reality. `p_value` is **optimistically biased** — treat it as an upper bound on the edge, and re-run at `suggested_block`. |
+| suggested < used | The null kept more structure than measured: a stricter test than the series needs. A pass still counts; a fail may be the block rather than the strategy. |
+
+`vol_acf_lag1_significant` is a separate axis: a series can have no return memory at all (so
+single-bar permutation is right for a **directional** edge) while volatility clusters for dozens of
+bars. If the edge is a **volatility** one — breakout, ATR sizing, vol filters — a block below
+`vol_acf_decay_lag` leaves the null a calmer market than the real one.
 
 **`search_mode` — what the null actually is.** `fixed` (the default) re-runs the strategy's
 authored input defaults on every permutation: one backtest each. Its null is *"what this one rule
@@ -377,19 +454,52 @@ synthetic. It answers "where does this config break?", not "is this edge real?".
 
 Above common fields, plus:
 ```
-model            string   optional  ("ou_jump" — the only generator today)
-half_lives       [float]  optional  (X axis: reversion half-lives in bars. Max 12 values)
+model            string   optional  ("auto" | "ou_jump" | "trend_ar1" | "both"; default ou_jump)
+half_lives       [float]  optional  (X axis: persistence half-lives in bars. Max 12 values)
 jump_rates       [float]  optional  (Y axis: jumps per 1000 bars. Max 12 values)
 paths            int      optional  (default 20; 1..100 — simulated paths per cell)
 jump_sigma       float    optional  (0..50)
 vol_mult         float    optional  (0.1..10)
 bars             int      optional  (100..5000 — bars per synthetic path)
-metric           string   optional  (the statistic each cell is scored on)
+metric           string   optional  (the statistic each cell is scored on — same set as
+                                     robustness, incl. "expr: <formula>")
+survival         string   optional  (what counts as a path SURVIVING its cell;
+                                     default "net_pnl_pct > 0")
 seed             int      optional
 params_override  object   optional  { var_name: number|bool }  (strings rejected)
 ```
 The instrument's own calibrated coordinate is forced onto the grid, so a run is usually one row and
-one column larger than the axes you pass.
+one column larger than the axes you pass. It is OMITTED when that coordinate is not measurable
+(see `phi_clamped` / `trend_rho_clamped` below) rather than placed at a fabricated position.
+
+**The model picks which family of markets the grid is made of.** `ou_jump` fits AR(1) to the log
+*price* and generates MEAN-REVERTING markets; `trend_ar1` fits the same estimator to the log
+*return* and generates MOMENTUM ones. `both` puts them on a single SIGNED axis — negative
+`half_life_bars` = reversion, `0` = a random walk, positive = momentum — mirroring the half-lives
+you pass either side of the centre (so pass ~half as many). `auto` measures the instrument and
+picks, resolving to `both` when the verdict is inconclusive, which most series are at most
+horizons; it is resolved in the engine, after the observed run, because the verdict depends on how
+long the strategy holds.
+
+**`metric` and `survival` are different settings and the report shows both.** `metric` scores each
+path and drives the `median` / `mean` layers; `survival` is a pass-or-fail line and drives
+`frac_profitable`, the layer the report leads with. A statistic only has to RANK paths, so any
+expression works; a count needs a LINE, and "> 0" is the wrong one for profit factor (neutral 1) or
+win rate (neutral 50) and undefined for an `expr:` objective — which is why the two are set apart.
+
+`survival` is comparisons over the metric variables, joined by `and` (max 4):
+```
+net_pnl_pct > 0                             the default: made money
+net_pnl_pct > 0 and max_dd_pct < 20         made money without breaching a 20% risk budget
+max_dd_pct < 20                             says nothing about profit — only that it held the line
+net_pnl_pct > 2 * max_dd_pct                both sides may be expressions
+net_pnl_pct > 0 and trades >= 5             excludes cells that look safe by barely trading
+```
+Operators `>`, `>=`, `<`, `<=` (no `==`, no `or`). Variables are the objective set: `net_pnl_pct`,
+`max_dd_pct` (a POSITIVE percentage), `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`,
+`return_over_dd`. The criterion is fixed for the whole run, so cells compare with each other; two
+RUNS compare only if they state the same one, which is why it is echoed in the results. A
+criterion that does not parse is rejected at submit time, never silently substituted.
 
 **Pass `params_override`.** Stress runs one fixed parameter set across every synthetic market, so it
 should be the set you actually deploy — the same override you send to `/jobs/backtest` and
@@ -400,9 +510,37 @@ a sweep produces the config, and the permutation test must re-run the procedure 
 Only the execution timeframe is used — no HTF, no intrabar. A strategy that depends on
 `request.security` behaves differently here than in its backtest.
 
-Results (`GET .../results`): `calibration` (`phi`, `theta`, `half_life_bars`, `sigma`,
-`jumps_per_1k`, `n_bars`) and `cells[]`, each with `half_life_bars`, `jumps_per_1k`, `median`,
-`p25`, `p75`, `mean`, `min`, `max`, `frac_profitable`, `median_trades`.
+Results (`GET .../results`): `model` (what actually ran), `model_requested` (differs only when it
+was `"auto"`), `axis_kind` (`"reversion"` | `"trend"` | `"signed"` — what `half_life_bars` means),
+`survival` (the criterion as written), `calibration`, and `cells[]` with `half_life_bars`, `jumps_per_1k`, `median`, `p25`, `p75`, `mean`,
+`min`, `max`, `frac_profitable`, `median_trades`.
+
+`calibration` carries the fitted market plus a measurement of which family the instrument is
+actually in — the grid only contains one, so read this before reading the grid:
+```
+phi, theta, half_life_bars     AR(1) on the log price → the reversion coordinate
+trend_rho, trend_half_life_bars  AR(1) on the log return → the momentum coordinate
+sigma, jumps_per_1k, mu_log, n_bars
+phi_clamped / trend_rho_clamped  true = that coordinate is the model's bound, NOT a measurement
+family                         "mean_reverting" | "trending" | "inconclusive"
+family_reason                  the verdict in words
+horizon_bars                   mean bars HELD per trade — the horizon family is read at
+vr_headline_q                  the ladder rung family was decided on
+variance_ratio                 [{q, vr, z}] — Lo-MacKinlay ladder, q = 2..128
+vr_winsorized                  returns clipped as outliers (non-zero → check for an unadjusted split)
+```
+`vr` below 1 means moves tend to reverse over `q` bars, above 1 that they persist; `z` is
+significant beyond ±1.96. It measures *persistence, not direction* — an instrument that rose
+tenfold on independent moves is `inconclusive`, and that is the correct answer. On a `family` that
+disagrees with the model you chose, the envelope describes a market the instrument is not in.
+
+`frac_profitable` counts paths meeting `survival`, never `metric`. The wire name is historical: on
+the default criterion it is exactly the profitable count it always was, but under a drawdown budget
+a high value does NOT imply the paths made money. Read `survival` before reading the layer.
+
+Fields other than `phi`/`theta`/`half_life_bars`/`sigma`/`jumps_per_1k`/`n_bars` are absent from
+results written before 2026-08-10, and `survival` from those written before 2026-08-12 — which all
+used the default.
 
 ### POST /api/v1/jobs/live — available on **every plan** (free included)
 Live trading is not plan-gated. What a tier buys is *capacity* — live bots draw on the same
@@ -604,6 +742,44 @@ to_date    date    required
 source     string  optional  (default "yahoo")
 ```
 Response: the resulting catalog entry.
+
+### GET /api/v1/data/structure — measured serial dependence of a cached dataset
+Query params: `symbol`, `timeframe`, `data_source` (required), `from_date`, `to_date` (optional
+`YYYY-MM-DD`, gate the measurement to the window you will actually test). `400` if the dataset is
+not cached — fetch it first.
+
+Answers one question: **is shuffling this series a fair thing to do?** Run it before
+`POST /jobs/robustness` and pass the `suggested_block` it returns as `block_size`.
+
+```
+bars                      int      bars measured, after the date gate
+acf                       [float]  return autocorrelation at lags 1..N
+acf_band                  [float]  per-lag 95% band. Per-lag, and wider than the textbook
+                                     1.96/sqrt(n), because it is robust to volatility
+                                     clustering — which otherwise inflates the ACF's sampling
+                                     variance and invents dependence that is not there
+acf_band_nominal          float    the textbook 1.96/sqrt(n), for comparison. The gap between
+                                     this and acf_band[0] is how heteroskedastic the series is
+acf_abs                   [float]  autocorrelation of |returns| — volatility clustering, which
+                                     the return ACF and Hurst/VR are all blind to
+acf_abs_band              float    1.96/sqrt(n) band for acf_abs
+acf_lag1                  float    \ the headline numbers, and whether each clears its band
+acf_lag1_significant      bool     /
+vol_acf_lag1              float    \
+vol_acf_lag1_significant  bool     /
+acf_decay_lag             int|null lag from which the ACF stays inside its band; null = the
+                                     dependence outruns the measurable window
+vol_acf_decay_lag         int|null the same for |returns|
+suggested_block           int      the block size the measurement implies. 1 = no detectable
+                                     return memory, so single-bar permutation IS the right
+                                     (and strictest) null here — not a fallback
+summary                   string   one-line plain-English verdict
+```
+
+Sized from **return** memory only. Volatility clustering runs for hundreds of lags, and letting it
+drive the block would leave a handful of blocks to shuffle — the "null distribution" would collapse
+to a few dozen arrangements and the test would lose all resolution. Clustering is reported
+separately so it can inform the reading instead of wrecking the null.
 
 ### GET /api/v1/data/massive-status → `{ "configured": bool }`
 Whether the Massive data source is configured on the server (i.e. whether `source: "massive"`
