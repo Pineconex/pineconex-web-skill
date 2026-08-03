@@ -59,6 +59,19 @@ overrides. Each has `kind` plus `var_name`, `title`, `defval`, `swept`, and kind
 - `bool`: (just defval)
 - `string`: `options: [string]`
 
+### GET /api/v1/strategies/{id}/universe → array of strings
+The cross-symbol universe the strategy reads via `request.security`, in call order, one entry per
+instrument (the same symbol at two timeframes is one entry). `[]` when the strategy reads none.
+
+This is the **book** for a portfolio backtest, a portfolio sweep, and `mode: "portfolio"` on
+`/jobs/live` — those job types take no symbol list, because the strategy names its own legs. Use
+this to show a user what a portfolio run will actually trade before launching it.
+
+Symbols come back exactly as written in the source and are **not** matched against the catalog, so
+this call is cheap and never fails on an unknown symbol; the launcher does the matching and
+rejects what it cannot trade. Both declaration styles resolve — a literal `array.from("A","B")`
+universe *and* legs bound to `input.string` variables.
+
 ### GET /api/v1/strategies/{id}/params → `{ "params_json5": string|null }`
 ### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
 
@@ -242,13 +255,14 @@ book summary / equity / trades.
 ### POST /api/v1/jobs/sweep
 Above common fields, plus:
 ```
-mode        "grid"|"random"|"rbf"   required
-trials      int    optional  (random/rbf; rbf calls it the budget)
+mode        "grid"|"random"|"rbf"|"monte_carlo"   required
+trials      int    optional  (random/rbf/monte_carlo; rbf and monte_carlo call it the budget)
 metric      string optional  (default "net_pnl_pct". The objective the search hill-climbs.
                               One of: net_pnl_pct | return_over_dd | sharpe | profit_factor |
                               expectancy | win_rate | max_dd_pct (minimised) — or a custom
                               expression "expr: <formula>", see below.
-                              ONLY rbf steers — grid and random ignore it, see below)
+                              ONLY rbf and monte_carlo steer — grid and random ignore it,
+                              see below)
 min_trades  int    optional  (default 5; 0..1000. A trial with fewer closed trades can never
                               win — not in the search, not in the results ranking. 0 disables)
 perm_seed   int    optional  (sweep a bar-PERMUTED copy of the series instead of the
@@ -263,10 +277,29 @@ A 1-axis grid is valid — the cartesian product of a single axis is that axis.
 to the single authored point and rbf exits non-zero in the container. Mark an input by putting
 `//@sweep` on the line above its `input.int` / `input.float` call.
 
-**`metric` only aims `rbf`.** Grid enumerates every cell and random samples blindly: both evaluate a
-predetermined set of points no matter what the objective is, and you rank the output afterwards.
-Only `rbf` hill-climbs, so only `rbf` has a search to aim. Sending `metric` with grid/random is not
-an error — it simply has no effect.
+**`metric` only aims `rbf` and `monte_carlo`.** Grid enumerates every cell and random samples
+blindly: both evaluate a predetermined set of points no matter what the objective is, and you rank
+the output afterwards. Only `rbf` and `monte_carlo` hill-climb, so only they have a search to aim.
+Sending `metric` with grid/random is not an error — it simply has no effect.
+
+**`monte_carlo` is the cross-entropy method, not the simulated annealing that carried this name
+until 2026-07-13.** It samples a population of candidates each round, keeps the best fifth of them,
+refits its sampling distribution to those, and repeats — spending a quarter of the budget before it
+commits to anything. Practical differences from `rbf`:
+
+- It converges to distinct parameter sets and **stops early** if the distribution collapses onto
+  ground it has already covered, so a finished job may report fewer trials than `trials` asked for.
+  That is the search reporting it had nothing left to learn, not a truncated run.
+- The candidates within a round are independent, so it evaluates them **in parallel**; `rbf` must
+  refit its surrogate after every single point and cannot. On a large budget it finishes in roughly
+  a seventh of `rbf`'s wall-clock for comparable results.
+
+**Do not read either steered mode as "better than random".** Benchmarked on 5 instruments x 3 seeds
+at equal budget (2026-08-02), `rbf` beat blind random by +0.68 and `monte_carlo` by +0.38 net PnL %,
+and **neither margin is statistically distinguishable from zero** (95% CIs [-0.91, +2.26] and
+[-1.07, +1.84]). Steering is cheap to try and has not been shown to be worth choosing over `random`
+on this evidence. What the same benchmark does establish is that both are safe: the deleted
+annealing mode lost to random consistently, and these two do not.
 
 **Custom objective: `"metric": "expr: <formula>"`.** An arithmetic expression over the trial
 metrics, e.g. `"expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"`. Variables: `net_pnl_pct`,
@@ -323,16 +356,20 @@ universe as `/portfolio-backtest`. Every trial is a full book run, and results.j
 Common fields EXCEPT `symbol` / `htf_*` / `intrabar_*`, plus the book fields (`initial_capital`,
 `leverage` — see `/portfolio-backtest`) and the search fields:
 ```
-mode        "grid"|"random"|"rbf"   required
-trials      int    optional  (random samples / rbf budget)
-metric      string optional  (rbf objective; same set as /sweep, including "expr: <formula>".
-                              Only rbf steers — grid/random ignore it)
+mode        "grid"|"random"|"rbf"|"monte_carlo"   required
+trials      int    optional  (random samples / rbf|monte_carlo budget)
+metric      string optional  (steered-search objective; same set as /sweep, including
+                              "expr: <formula>". Only rbf and monte_carlo steer —
+                              grid/random ignore it)
 min_trades  int    optional  (default 5; 0..1000. Book-wide closed-trade floor)
 ```
-No `perm_seed` / `perm_block`: in-sample permutation is single-instrument only. Same rules as the
-other sweep and the portfolio backtest apply — **400** if the strategy has no `//@sweep` parameters,
-and **400** if its universe resolves to fewer than 2 tradable legs. Trials run serially (a book run
-is heavier than a single symbol), so keep grids modest on a large universe.
+No `perm_seed` / `perm_block`: in-sample permutation is single-instrument only. All four search
+modes do work here. Same rules as the other sweep and the portfolio backtest apply — **400** if the
+strategy has no `//@sweep` parameters, and **400** if its universe resolves to fewer than 2 tradable
+legs. Trials run serially (a book run is heavier than a single symbol), so keep grids modest on a
+large universe — and note `monte_carlo` gains nothing from parallelism here for the same reason,
+though it still stops early rather than re-buying a book run it has already done, which on a
+portfolio is the expensive kind of waste.
 
 ### POST /api/v1/jobs/robustness
 Permutation (Monte Carlo significance) test: bar-permutes the price series N times,
@@ -348,11 +385,11 @@ metric        string  optional  (default "net_pnl_pct". BOTH the statistic the p
                                   profit_factor | expectancy | win_rate — or a custom
                                   "expr: <formula>", same syntax as the sweep metric.
                                   max_dd_pct is NOT accepted here — 400)
-search_mode   string  optional  ("fixed"(default)|"grid"|"random"|"rbf" — the SELECTION
-                                  PROCEDURE re-run inside every permutation. See below: this
-                                  is the null hypothesis itself, and the default is only
-                                  correct if the parameters were NOT found by a sweep)
-search_trials int     optional  (candidates per permutation for random/rbf.
+search_mode   string  optional  ("fixed"(default)|"grid"|"random"|"rbf"|"monte_carlo" — the
+                                  SELECTION PROCEDURE re-run inside every permutation. See
+                                  below: this is the null hypothesis itself, and the default
+                                  is only correct if the parameters were NOT found by a sweep)
+search_trials int     optional  (candidates per permutation for random/rbf/monte_carlo.
                                   Ignored by fixed and grid)
 min_trades    int     optional  (default 5; 0..1000. A trial with fewer closed trades can
                                   never be the winner the statistic is read from — applied
@@ -373,8 +410,15 @@ seed          int     optional  (RNG seed; omit for a time-seeded run. The effec
 permuted bars *is* the procedure that ran on the real bars. A search that optimised net PnL while
 the test reported win rate would be a different procedure, and its null would not describe it — so
 the search hill-climbs the statistic you ask for. Set it to whatever your sweep optimised. (Only
-`rbf` steers; `grid`/`random`/`fixed` evaluate a predetermined set of trials either way, and the
-statistic merely selects the maximum.)
+`rbf` and `monte_carlo` steer; `grid`/`random`/`fixed` evaluate a predetermined set of trials either
+way, and the statistic merely selects the maximum.)
+
+**`search_mode` must be the search you actually ran, not the cheapest one.** `monte_carlo` and `rbf`
+are different procedures and produce different nulls — measured on the same strategy and series
+(20 permutations, 246 candidates): `rbf` gave p = 0.19 against a null mean of +24.78%, `monte_carlo`
+p = 0.29 against +17.74%. Neither is the "right" p-value in the abstract; the right one is the one
+whose procedure matches how you actually chose your parameters. Both cost about the same to run
+(82s vs 77s), so there is nothing to save by declaring the other one.
 
 `max_dd_pct` is rejected here on purpose: every accepted statistic is higher-is-better, which is
 what makes the one-sided upper tail correct. A custom `expr:` statistic is accepted — the engine
@@ -552,6 +596,11 @@ symbol              string  required  (the primary symbol; with `symbols`, its f
 symbols             array   optional  (string[]; ≥2 entries = a multi-symbol BASKET traded by one
                                        bot in one process — see below. 0/1 entries = ordinary
                                        single-symbol bot)
+mode                string  optional  ("single"|"basket"(default)|"portfolio") — which of the
+                                       three live modes to run. Only `portfolio` changes
+                                       behaviour; omit it for the historical basket semantics
+leverage            number  optional  (portfolio only; default 1.0, must be in (0,4]) — the
+                                       book's gross-exposure cap as a multiple of ACCOUNT equity
 timeframe           string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no
                                        weekly/monthly/1m. "1H"→60m and "4H"→240m are aliased,
                                        but 240m is not in the live subset, so 1D/90m/60m/30m/
@@ -584,6 +633,38 @@ cosmetic):
   months, each with its own front-month resolution — not exercised yet).
 - Every entry is a `tv_symbol` that must exist, be enabled, and be `live_tradable`; unknown or
   data-only rows are rejected `400`.
+
+**`mode: "portfolio"` runs a book, and THE STRATEGY NAMES IT.** A portfolio takes no symbol list:
+its legs are the strategy's own `request.security` universe, the same rule as a portfolio
+backtest. Any `symbols` you send is **replaced** by that universe and `symbol` becomes its first
+entry — read the list back from
+[`GET /api/v1/strategies/{id}/universe`](#get-apiv1strategiesiduniverse) before launching.
+Deriving rather than trusting the caller is what keeps the book and the strategy in step: a leg
+the strategy never reads would trade unranked, and a symbol it ranks but that is missing from the
+book would be scored and then never traded.
+
+The difference from a basket is a governor. A basket is N independent bots sharing a broker
+connection: each leg sizes `percent_of_equity` off your FULL account equity, so N legs at 100% try
+to deploy N×100% of the account. A portfolio's legs share the account's equity and a combined
+gross-exposure ceiling (`Σ|leg notional| ≤ leverage × equity`), so together they never commit more
+than the cap allows. The leg that would breach it is sized down (logged as
+`[portfolio] gross cap: X -> Y`); when the book is already full the entry is skipped entirely
+rather than sent as a zero-quantity order.
+
+The account IS the book: equity is read from the broker at launch and re-read on every heartbeat,
+so the ceiling follows the account. Constraints, all `400`:
+
+- **`mode` must be one of `single` / `basket` / `portfolio`.**
+- **The strategy's universe must be 2–5 symbols.** Fewer than 2 is a single-symbol bot, not a
+  book. More than 5 is refused: unlike a backtest, where a wide universe costs only CPU, every
+  live leg is a real position on a real account. Narrow the basket or run a portfolio backtest.
+- **`leverage` must be in `(0, 4]`**. 1.0 caps the book at the account size; 2.0 permits fully
+  long and fully short at once and therefore needs a margin account that allows shorting.
+- **`leverage > 1.0` is refused on `bitstamp`** — spot cannot borrow, so the venue would reject
+  the resulting orders one by one.
+- A launch is **refused outright if the broker reports no account equity**: a book of zero would
+  clamp every leg to zero, and the bot would run, log signals and never trade.
+- The mode survives an auto-restart — a portfolio comes back as a portfolio, cap included.
 
 **`options_routing` hands execution to the options runtime (Alpaca only).** Each signal is scored
 across the underlying shares and the option chain and the better risk-adjusted expression is
@@ -635,12 +716,31 @@ history — and a coin that was *deposited* (or bought outside the API's 30-day 
 has no purchase price anywhere. Rather than invent one, the bot logs that it cannot price the
 holding and stays flat. Fund a Bitstamp bot's account by **buying** the coin, not depositing it.
 
+**Every order a live bot places carries a client reference**, so a broker's own trade report can
+be attributed back to a specific bot rather than guessed at from a symbol and a time window —
+which is ambiguous the moment two bots on one account trade the same instrument, exactly the case
+the platform allows. The shape is `pcx-<strategy-slug>-<job-id first 8>-<run><seq>`, on Alpaca's
+`client_order_id`, Saxo's `ExternalReference` and Bitstamp's `client_order_id`. It is
+reconciliation only — nothing in the order path reads it back, and only 8 characters of the job id
+fit, so treat it as narrowing an order to a job rather than proving which one.
+
+Realized per-bot performance (closed round trips, win rate, risk-adjusted edge) is collected from
+the bots and shown under **Live → Performance** in the web UI. It is deliberately **not** part of
+the `/api/v1` contract yet: its shape will move as account-level figures land, and `/api/v1` is a
+stability promise.
+
 ### GET /api/v1/jobs — list (recent) → array of `JobResponse`
 Your own jobs, newest first, hard-capped at **50**. There are no query parameters — no
 `limit`/`offset`, no status or type filter, no pagination cursor. Filter client-side.
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
 ### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type)
 - **backtest** — performance metrics + `hurst` / `variance_ratio`
+
+> **Removed 2026-08-03: results no longer carry a `price_structure` block.** It described the
+> PRICE SERIES, so it was identical for every strategy ever run on that dataset — the same numbers
+> on every winner and every loser. Ask `GET /api/v1/data/structure` for the dataset instead; it
+> answers the same question once, with the ACF, a walking window and the archetype fit. The
+> `hurst` / `variance_ratio` fields the engine itself writes into `summary` are unaffected.
 - **sweep** — `mode`, `param_names`, `total_trials`, and `trials[]`. Each trial:
   `params` (by input *title*), `net_pnl_pct`, `max_dd_pct`, `n_trades`, `win_rate`, `profit_factor`,
   `sharpe`. Rank them yourself — the server does not pick a winner. `sharpe` is a **per-trade**
@@ -708,6 +808,11 @@ live_tradable  bool,
 strategy_profile  string|null
 ```
 
+`strategy_profile` is a **snapshot** keyed by `"<source>:<timeframe>"`, computed once when a
+dataset is downloaded. It goes stale the moment that dataset is extended. For a reading that
+always matches the bars it describes, use `strategy_fit` on `GET /api/v1/data/structure`, which is
+measured live.
+
 **`live_tradable = false` means data-only.** A cash index (DAX 40, CAC 40, …) has a price series
 but is not an instrument anyone can hold, so it backtests and sweeps normally and is refused at
 live launch: `400 "<sym> is a data-only symbol — an index level, not an instrument you can hold.
@@ -748,11 +853,21 @@ Query params: `symbol`, `timeframe`, `data_source` (required), `from_date`, `to_
 `YYYY-MM-DD`, gate the measurement to the window you will actually test). `400` if the dataset is
 not cached — fetch it first.
 
-Answers one question: **is shuffling this series a fair thing to do?** Run it before
-`POST /jobs/robustness` and pass the `suggested_block` it returns as `block_size`.
+Answers two questions: **what did this market do, before any strategy touched it?** and **is
+shuffling this series a fair thing to do?** Run it before `POST /jobs/robustness` and pass the
+`suggested_block` it returns as `block_size`.
 
 ```
 bars                      int      bars measured, after the date gate
+variance_ratio            float|null  Lo-MacKinlay VR(2). <1 reverting, 1 random walk, >1 trending
+vr_z                      float|null  heteroskedasticity-robust z against the random-walk null
+vr_p                      float|null  two-sided p for vr_z
+price_structure           string   "mean_reverting" | "trending" | "random_walk" | "unknown".
+                                     THE FIELD TO LABEL ON — see the note below
+price_structure_label     string   the same verdict as display text
+price_structure_detail    string   one sentence including the sample size it rests on, and — when
+                                     the verdict is "random_walk" — the smallest effect these bars
+                                     could have resolved at all
 acf                       [float]  return autocorrelation at lags 1..N
 acf_band                  [float]  per-lag 95% band. Per-lag, and wider than the textbook
                                      1.96/sqrt(n), because it is robust to volatility
@@ -774,7 +889,58 @@ suggested_block           int      the block size the measurement implies. 1 = n
                                      return memory, so single-bar permutation IS the right
                                      (and strictest) null here — not a fallback
 summary                   string   one-line plain-English verdict
+history                   [obj]    the SAME headline metrics on a walking window, oldest first.
+                                     Empty when the series is too short for one full window
+strategy_fit              obj|null archetype scores for these bars (see below)
 ```
+
+Each `history` entry:
+
+```
+end_ms                    int      ms since epoch of the window's LAST bar. A point describes the
+                                     window ENDING there, never one centred there — nothing uses
+                                     bars from its own future
+n                         int      returns in the window (constant except possibly at the tail)
+variance_ratio, vr_z, acf_lag1, acf_lag1_significant, price_structure   as above, per window
+```
+
+**Read `price_structure` / `variance_ratio`, not `hurst`.** The R/S Hurst exponent measures
+long-range dependence over many horizons, which is a *different property* from the one-step
+reversion a mean-reversion strategy trades. Measured on series whose character is known by
+construction, a Hurst threshold cannot return "mean reverting" for any realistic market: an AR(1)
+with rho = -0.09 is mean reverting by definition and reports Hurst 0.573 ("trending"), and even
+rho = -0.30 only reaches 0.502 ("random walk"). The variance ratio separates those cases cleanly,
+and its z is what distinguishes VR = 0.970 on 30,000 bars (real) from VR = 0.89 on 300 bars
+(noise). Hurst is still reported where it appears; it is not the field to branch on.
+
+**A `"random_walk"` verdict is a statement about the MEASUREMENT as much as the market.** Read
+`price_structure_detail` before concluding the market has no structure — a short window simply
+cannot resolve a small effect, and the sentence says how small an effect it could have detected.
+
+**One number over a whole history can hide a regime change**, which is what `history` is for. Real
+example: NASDAQ:FLWS 1m reports an emphatic z = -17.37 overall, while the walk splits 30 windows
+mean-reverting / 31 random walk. Neighbouring windows share most of their bars, so treat it as a
+moving average — a turn means something once it persists for about a window's width.
+
+`strategy_fit` scores how well these bars suit each trading archetype, 0-100:
+
+```
+scores.mean_reversion / trend_following / momentum / breakout / swing_trading   int|null
+scores.scalping                                        null (needs live spread + depth)
+detail.vr_z                                            float|null  the z the scores used
+detail.structure_resolved                              bool|null   false = |z| < 1.96
+detail.<sub-metric>                                    the raw inputs behind each score
+```
+
+**When `detail.structure_resolved` is `false`, ignore `mean_reversion` and `momentum`.** Those two
+rest on the variance-ratio z, and inside +/-1.96 these bars cannot tell reverting from trending at
+all — the numbers are the limit of the measurement, not a finding. The web UI dims them for this
+reason. The other archetypes rest on descriptive measures (ADX, ATR, ranges) without this
+particular power problem.
+
+These are descriptive market statistics, **not a recommendation to trade anything**. They are
+measured live from the same bars as the rest of this response, so they always describe the same
+window as the verdict above them.
 
 Sized from **return** memory only. Volatility clustering runs for hundreds of lags, and letting it
 drive the block would leave a handful of blocks to shuffle — the "null distribution" would collapse
@@ -944,6 +1110,7 @@ telegram_bot_token  string | null   (returned decrypted — it is your own crede
 telegram_chat_id    string | null
 github_id           int    | null
 github_linked_repo  string | null   ("owner/repo")
+hidden_brokers      string[]        (broker cards hidden in the web UI — cosmetic only)
 created_at          datetime
 dedicated_vps       object | null   ({ subdomain, status }; Dedicated tier only)
 ```
@@ -960,6 +1127,16 @@ clear it. A non-empty phone must start with `+` and hold 7–15 digits.
 
 Changing `github_linked_repo` also moves the sync webhook: it is deleted from the old repo and
 registered on the new one.
+
+### PUT /api/v1/auth/me/brokers — which broker cards the web UI shows → the stored array
+`{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `propfirm`, `ibkr`,
+`ibkr_web`, `lightspeed`; an unknown id is a `400`. The list is sorted and de-duplicated before
+storing, and `[]` shows every card again.
+
+**Cosmetic.** Hiding a broker does not disconnect it, does not revoke its credentials and does
+not affect a running bot — a hidden broker's live jobs keep trading, and its own endpoints
+(`/api/v1/saxo/*`, `/api/v1/alpaca/*`, …) keep working. This is a separate route rather than a
+`PATCH /me` field because that call erases an omitted `phone`.
 
 ### DELETE /api/v1/auth/me → `204` — GDPR Art. 17 erasure. **Irreversible.**
 Stops and deletes every running job, hard-deletes your strategies, bot events and parse errors

@@ -115,6 +115,30 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/InputSpec" }
 
+  /api/v1/strategies/{id}/universe:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getStrategyUniverse
+      tags: [Strategies]
+      summary: The cross-symbol universe the strategy reads via request.security — its book.
+      description: >-
+        One entry per instrument, in call order (the same symbol at two timeframes is one entry);
+        [] when the strategy reads none. This is the BOOK for a portfolio backtest, a portfolio
+        sweep, and mode:"portfolio" on /jobs/live — those take no symbol list, because the strategy
+        names its own legs. Symbols come back exactly as written in the source and are not matched
+        against the catalog, so the call is cheap and never fails on an unknown symbol; the
+        launcher does the matching. Both declaration styles resolve — a literal array.from("A","B")
+        universe and legs bound to input.string variables.
+      responses:
+        "200":
+          description: Array of symbols, possibly empty.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+
   /api/v1/strategies/{id}/params:
     parameters:
       - $ref: "#/components/parameters/PathId"
@@ -563,9 +587,16 @@ paths:
     get:
       operationId: dataStructure
       tags: [Data]
-      summary: Measured serial dependence of a cached dataset, and the permutation block size it implies.
+      summary: Price structure of a cached dataset, and the permutation block size it implies.
       description: >-
-        Answers whether shuffling this series is a fair thing to do, and what block size it needs.
+        Answers two questions -- what did this market do before any strategy touched it, and is
+        shuffling this series a fair thing to do.
+        Branch on price_structure / variance_ratio, NEVER on hurst: R/S Hurst measures long-range
+        dependence over many horizons, a different property from the one-step reversion a
+        mean-reversion strategy trades. An AR(1) with rho = -0.09 is mean reverting by construction
+        and reports Hurst 0.573 ("trending").
+        A "random_walk" verdict is as much about the measurement as the market -- read
+        price_structure_detail, which states the smallest effect these bars could have detected.
         POST /api/v1/jobs/robustness already does this for you -- its block_size defaults to "auto",
         which measures the series being permuted -- so this endpoint is for INSPECTING an instrument
         (before choosing one, or to explain a result), not a required step. A permutation test is
@@ -619,6 +650,78 @@ paths:
                       Block size the measurement implies. 1 means no detectable return memory, so
                       single-bar permutation is the correct and strictest null — not a fallback.
                   summary: { type: string, description: One-line plain-English verdict. }
+                  variance_ratio:
+                    type: number
+                    nullable: true
+                    description: Lo-MacKinlay VR(2). Below 1 reverting, 1 random walk, above 1 trending.
+                  vr_z:
+                    type: number
+                    nullable: true
+                    description: Heteroskedasticity-robust z against the random-walk null.
+                  vr_p: { type: number, nullable: true }
+                  price_structure:
+                    type: string
+                    enum: [mean_reverting, trending, random_walk, unknown]
+                    description: The verdict. THE field to branch on — not hurst.
+                  price_structure_label: { type: string }
+                  price_structure_detail:
+                    type: string
+                    description: >-
+                      One sentence including the sample size, and — when the verdict is random_walk —
+                      the smallest effect these bars could have resolved at all.
+                  history:
+                    type: array
+                    description: >-
+                      The same headline metrics on a walking window, oldest first. One number over a
+                      whole history can hide a regime change. Empty when the series is too short for
+                      one full window. Neighbouring windows overlap heavily — read it as a moving
+                      average, not as events.
+                    items:
+                      type: object
+                      properties:
+                        end_ms:
+                          type: integer
+                          description: >-
+                            Milliseconds since epoch of the window's LAST bar. A point describes the
+                            window ending there, so nothing uses bars from its own future.
+                        n: { type: integer }
+                        variance_ratio: { type: number, nullable: true }
+                        vr_z: { type: number, nullable: true }
+                        acf_lag1: { type: number }
+                        acf_lag1_significant: { type: boolean }
+                        price_structure: { type: string }
+                  strategy_fit:
+                    type: object
+                    nullable: true
+                    description: >-
+                      How well these bars suit each trading archetype, 0-100, measured live from the
+                      same window as everything above. Descriptive market statistics, NOT a
+                      recommendation to trade anything.
+                      When detail.structure_resolved is false, ignore mean_reversion and momentum:
+                      inside |z| < 1.96 these bars cannot tell reverting from trending, so those two
+                      are the limit of the measurement rather than a finding.
+                    properties:
+                      scores:
+                        type: object
+                        properties:
+                          mean_reversion:  { type: integer, nullable: true }
+                          trend_following: { type: integer, nullable: true }
+                          momentum:        { type: integer, nullable: true }
+                          breakout:        { type: integer, nullable: true }
+                          swing_trading:   { type: integer, nullable: true }
+                          scalping:
+                            type: integer
+                            nullable: true
+                            description: Always null — needs live spread and market depth.
+                      detail:
+                        type: object
+                        description: Raw sub-metrics behind the scores.
+                        properties:
+                          vr_z: { type: number, nullable: true }
+                          structure_resolved:
+                            type: boolean
+                            nullable: true
+                            description: False when |vr_z| < 1.96 — the sample cannot resolve the structure.
         "400":
           description: Dataset is not cached — fetch it first.
 
@@ -984,9 +1087,9 @@ components:
         - type: object
           required: [mode]
           properties:
-            mode: { type: string, enum: [grid, random, rbf], description: "bayesian and monte_carlo were REMOVED 2026-07-13 (both failed a blind-random control at equal budget: monte_carlo scored worse than random, bayesian tied it). Sending either now returns 400." }
-            trials: { type: integer, nullable: true, description: "Evaluations for random/rbf (rbf calls it the budget). Grid derives its count from minval/maxval/step." }
-            metric: { type: string, default: net_pnl_pct, description: "The objective the search hill-climbs. One of net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate, max_dd_pct (minimised) — or a custom expression 'expr: <formula>' over the trial metrics (variables: net_pnl_pct, max_dd_pct, trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd; operators + - * / ( )), maximised as written, e.g. 'expr: net_pnl_pct - 0.5 * max_dd_pct'. ONLY rbf steers — grid enumerates every cell and random samples blindly, so both ignore it (not an error, just no effect). Requires the strategy to have //@sweep params (400 otherwise)." }
+            mode: { type: string, enum: [grid, random, rbf, monte_carlo], description: "bayesian was REMOVED 2026-07-13, along with the simulated annealing that was then called monte_carlo (both failed a blind-random control at equal budget: annealing scored worse than random, bayesian tied it); sending bayesian returns 400. monte_carlo was REINTRODUCED 2026-08-02 as a different algorithm, the cross-entropy method: it samples a population per round, keeps the best fifth, refits its sampling distribution to those, and repeats. It evaluates a round's candidates in parallel (rbf cannot, since it refits a surrogate after every point) and it STOPS EARLY once the distribution only proposes parameter sets it has already tested, so a finished job may report fewer trials than requested. Do not read either steered mode as better than random: on 5 instruments x 3 seeds at equal budget, rbf beat blind random by +0.68 and monte_carlo by +0.38 net PnL %, and neither margin is statistically distinguishable from zero." }
+            trials: { type: integer, nullable: true, description: "Evaluations for random/rbf/monte_carlo (rbf and monte_carlo call it the budget). Grid derives its count from minval/maxval/step." }
+            metric: { type: string, default: net_pnl_pct, description: "The objective the search hill-climbs. One of net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate, max_dd_pct (minimised) — or a custom expression 'expr: <formula>' over the trial metrics (variables: net_pnl_pct, max_dd_pct, trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd; operators + - * / ( )), maximised as written, e.g. 'expr: net_pnl_pct - 0.5 * max_dd_pct'. ONLY rbf and monte_carlo steer — grid enumerates every cell and random samples blindly, so both ignore it (not an error, just no effect). Requires the strategy to have //@sweep params (400 otherwise)." }
             min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never win — not in the search, not in the results ranking. 0..1000; 0 disables. This is what makes the non-PnL objectives safe: profit factor of a config that never trades is +inf (no losses) and win rate of one lucky trade is 100%, so with no floor a PF or win-rate search converges on a strategy that refuses to trade." }
             perm_seed: { type: integer, nullable: true, description: "Sweep a bar-PERMUTED copy of the series instead of the real bars. A permutation is fully determined by its seed, so re-submitting the same sweep under N seeds builds a null distribution of the best-of-search score — an in-sample Monte Carlo permutation test. No bars cross the wire. Rejected (400) with intrabar_timeframe." }
             perm_block: { type: integer, default: 1, description: "Permutation block size in bars (1..1000). 1 = single-bar. Ignored unless perm_seed is set." }
@@ -1016,9 +1119,9 @@ components:
         - type: object
           required: [mode]
           properties:
-            mode: { type: string, enum: [grid, random, rbf] }
-            trials: { type: integer, nullable: true, description: "random samples / rbf budget. Grid derives its count from minval/maxval/step." }
-            metric: { type: string, default: net_pnl_pct, description: "The rbf objective — same set as the sweep metric, including a custom 'expr: <formula>'. Only rbf steers; grid/random ignore it." }
+            mode: { type: string, enum: [grid, random, rbf, monte_carlo], description: "Same four searches as /jobs/sweep. monte_carlo gains no parallelism here (a book run is already serial across its legs) but still stops early rather than re-buying a book run it has already evaluated, so it can return fewer trials than the budget." }
+            trials: { type: integer, nullable: true, description: "random samples / rbf|monte_carlo budget. Grid derives its count from minval/maxval/step." }
+            metric: { type: string, default: net_pnl_pct, description: "The steered-search objective — same set as the sweep metric, including a custom 'expr: <formula>'. Only rbf and monte_carlo steer; grid/random ignore it." }
             min_trades: { type: integer, default: 5, description: "Book-wide closed-trade floor (0..1000; 0 disables). A trial below it can never win." }
     RobustnessRequest:
       allOf:
@@ -1044,8 +1147,8 @@ components:
                   minimum: 1
                   maximum: 1000
             seed: { type: integer, nullable: true, description: RNG seed; omit for time-seeded. Effective seed is echoed in results. }
-            search_mode: { type: string, enum: [fixed, grid, random, rbf], default: fixed, description: "The selection procedure re-run inside every permutation — this IS the null hypothesis. 'fixed' re-runs the strategy's authored input defaults (one backtest per permutation) and is correct ONLY if the parameters were chosen without looking at the data. If they came from a sweep, 'fixed' is optimistically biased: it cannot see that N candidates were tried, and the best of N noise draws is high by construction. Declare the search you actually used and it is re-run inside every permutation, so the null becomes 'the best score this strategy family can be fitted to noise'. Cost scales with it; permutations x search size is capped (400 over the limit)." }
-            search_trials: { type: integer, nullable: true, description: "Candidates per permutation for random/bayesian/rbf. Ignored by fixed and grid." }
+            search_mode: { type: string, enum: [fixed, grid, random, rbf, monte_carlo], default: fixed, description: "The selection procedure re-run inside every permutation — this IS the null hypothesis. 'fixed' re-runs the strategy's authored input defaults (one backtest per permutation) and is correct ONLY if the parameters were chosen without looking at the data. If they came from a sweep, 'fixed' is optimistically biased: it cannot see that N candidates were tried, and the best of N noise draws is high by construction. Declare the search you actually used and it is re-run inside every permutation, so the null becomes 'the best score this strategy family can be fitted to noise'. Cost scales with it; permutations x search size is capped (400 over the limit)." }
+            search_trials: { type: integer, nullable: true, description: "Candidates per permutation for random/rbf/monte_carlo. Ignored by fixed and grid. (The stale mention of bayesian here was a leftover: that mode was removed 2026-07-13.)" }
     StressRequest:
       allOf:
         - $ref: "#/components/schemas/CommonJobRequest"
@@ -1078,6 +1181,31 @@ components:
             single process, on one broker account and one shared timeframe, counting as ONE job
             against the concurrency quota. Zero or one entry is an ordinary single-symbol bot.
             Paid plans only (403 on free) and not supported on ibkr, lightspeed or propfirm (400).
+        mode:
+          type: string
+          enum: [single, basket, portfolio]
+          default: basket
+          description: >-
+            Which of the three live modes to run. `basket` (the default) gives every leg the FULL
+            account equity to size against, so N legs at percent_of_equity=100 try to deploy
+            N x 100% of the account. `portfolio` runs a BOOK: the legs share the account's equity
+            and a combined gross-exposure cap (see `leverage`), so together they never commit more
+            than the cap allows — the breaching leg is sized down, and an entry into a full book is
+            skipped rather than sent. In portfolio mode THE STRATEGY NAMES THE BOOK: the legs are
+            its own request.security universe (read it from GET /strategies/{id}/universe), any
+            `symbols` you send is replaced by it, and `symbol` becomes its first entry. The
+            universe must be 2-5 symbols. Refused if the broker reports no account equity.
+            Survives an auto-restart.
+        leverage:
+          type: number
+          default: 1.0
+          minimum: 0.1
+          maximum: 4
+          description: >-
+            Portfolio mode only: the book's gross-exposure cap as a multiple of ACCOUNT equity
+            (sum of |leg notional| <= leverage x equity). 1.0 caps the book at the account size;
+            2.0 permits fully long and fully short at once and so needs a margin account that
+            allows shorting. Values above 1.0 are refused on bitstamp, which cannot borrow.
         timeframe: { type: string }
         htf_timeframe: { type: string, nullable: true }
         intrabar_timeframe: { type: string, nullable: true, description: "Intrabar warmup resolution fetched from the broker feed (request.security_lower_tf). Live bots have no stored dataset, so there is no separate data source." }
