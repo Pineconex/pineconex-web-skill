@@ -86,7 +86,7 @@ Sweeps (`/api/v1/jobs/sweep`), robustness (`/api/v1/jobs/robustness`) and stress
 (`/api/v1/jobs/stress`) follow the same launch → poll → results shape. Robustness runs a
 permutation (Monte Carlo significance) test — it returns a `p_value` on whether the strategy's
 edge is real price structure or luck (low = real), plus `hurst`/`variance_ratio` describing the
-instrument. Stress maps where a config *breaks* across synthetic markets — it is neither an
+instrument (branch on the variance ratio, not Hurst — see the structure endpoint below). Stress maps where a config *breaks* across synthetic markets — it is neither an
 optimizer nor a significance test. Its `model` chooses the family of markets to sweep
 (`ou_jump` mean-reverting, `trend_ar1` momentum, `both` a signed axis through a random walk,
 `auto` to measure the instrument and pick); the results report which family the instrument is
@@ -105,10 +105,20 @@ universe, so they have **no `symbol` field** — instead `initial_capital` and `
 the shared book. portfolio-sweep uses the same `mode`/`trials`/`metric`/`min_trades` as `/sweep`
 (no `perm_seed`). Available on every plan; see `references/api-reference.md`.
 
-**Sweep modes are `grid`, `random`, `rbf`.** `bayesian` and `monte_carlo` were removed 2026-07-13
-after failing a blind-random control at equal budget (monte_carlo scored *worse* than random;
-bayesian tied it exactly). Only `rbf` steers, so only `rbf` reads `metric` — grid enumerates every
-cell and random samples blindly regardless of the objective.
+**Sweep modes are `grid`, `random`, `rbf`, `monte_carlo`.** Only `rbf` and `monte_carlo` steer, so
+only they read `metric` — grid enumerates every cell and random samples blindly regardless of the
+objective. `bayesian` was removed 2026-07-13 after failing a blind-random control at equal budget,
+along with the simulated annealing then named `monte_carlo` (it scored *worse* than random).
+`monte_carlo` now means the **cross-entropy method**, added 2026-08-02: it samples a population per
+round, keeps the best fifth, refits toward them, and repeats. It evaluates a round in parallel
+(`rbf` cannot) and stops early once it only proposes parameter sets it has already tried, so it may
+return fewer trials than the budget asked for.
+
+**Do not tell a user a steered mode beats random — that is not established.** On 5 instruments x 3
+seeds at equal budget, `rbf` was +0.68 and `monte_carlo` +0.38 net PnL % over blind `random`, and
+neither margin is statistically distinguishable from zero. Recommend `random` as a perfectly
+respectable default, `monte_carlo` when they want steering at random's wall-clock, and `grid` when
+the space is small enough to enumerate. All four work on `/jobs/portfolio-sweep` too.
 
 **Two settings users will not think to ask for, and should:**
 * **`metric`** — the objective. Defaults to `net_pnl_pct`, which will happily buy return with
@@ -117,7 +127,7 @@ cell and random samples blindly regardless of the objective.
   formula: `"metric": "expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"` — variables
   `net_pnl_pct`, `max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`,
   `return_over_dd`; operators `+ - * / ( )`. It is MAXIMISED as written (penalties get a minus
-  sign; drawdown is a positive %). Works on `/jobs/sweep` (rbf) and `/jobs/robustness`.
+  sign; drawdown is a positive %). Works on `/jobs/sweep` (rbf, monte_carlo) and `/jobs/robustness`.
 * **`min_trades`** (default 5) — a trial with fewer trades can never win. Do **not** set it to 0
   with `profit_factor` or `win_rate`: a config that never trades has no losses, so its profit
   factor is `+inf`, and the search will converge on a strategy that refuses to trade.
@@ -168,6 +178,36 @@ reality, and the `p_value` is **optimistically biased** — significance the str
 Compare `block_size` against `suggested_block` before reporting any p-value, and say so when they
 disagree.
 
+`GET /api/v1/data/structure` also answers "what did this market do, before any strategy touched
+it?" — and there is one field to branch on and one trap to avoid.
+
+**Label on `price_structure` / `variance_ratio`, never on `hurst`.** R/S Hurst measures long-range
+dependence over many horizons, a *different property* from the one-step reversion a mean-reversion
+strategy trades. Measured on series of known character, a Hurst threshold cannot return "mean
+reverting" for any realistic market: an AR(1) with rho = -0.09 is mean reverting by construction
+and reports Hurst 0.573 ("trending"). The variance ratio separates those cases, and its `vr_z`
+distinguishes a real effect from a small sample.
+
+**A `"random_walk"` verdict is as much about the measurement as the market.** Read
+`price_structure_detail` before saying an instrument has no structure — it states the smallest
+effect these bars could have detected at all. Reporting "no structure" when the honest answer is
+"this window cannot tell" is the most common way to misuse this endpoint.
+
+**One number can hide a regime change.** `history[]` re-measures the same metrics on a walking
+window (each point dated at the END of its window, so none uses bars from its own future).
+Measured: NASDAQ:FLWS 1m reports an emphatic z = -17.37 overall while the walk splits 30 windows
+reverting / 31 random walk. Neighbouring windows overlap heavily — read it as a moving average.
+
+`strategy_fit` scores the bars against each trading archetype 0-100. **When
+`strategy_fit.detail.structure_resolved` is `false`, do not report `mean_reversion` or
+`momentum`** — inside |z| < 1.96 these bars cannot tell reverting from trending, so those two are
+the limit of the measurement, not a finding. Descriptive statistics about a market, never a
+recommendation to trade it.
+
+Job results do **not** carry a price-structure block (removed 2026-08-03) — it described the price
+series, so it was identical for every strategy ever run on that dataset. Ask this endpoint about
+the dataset instead.
+
 Volatility clustering is a **separate axis** and is deliberately not allowed to size the block
 (it runs for hundreds of lags, which would leave too few blocks to shuffle). A series can have no
 return memory at all while volatility clusters for dozens of bars: irrelevant to a directional
@@ -205,11 +245,30 @@ open at the broker — nothing in the platform closes a position. If the user wa
 market, they must do it in their broker's own interface. Say so plainly rather than implying the
 stop got them flat.
 
+**Every order carries a client reference** — `pcx-<strategy-slug>-<job-id first 8>-<run><seq>`, on
+Alpaca's `client_order_id`, Saxo's `ExternalReference` and Bitstamp's `client_order_id`. Useful
+when a user is reading their broker's order history and asks which bot placed what. Only 8
+characters of the job id fit, so it narrows an order to a job rather than proving which one.
+
+**Realized per-bot performance is not on the API yet.** Closed round trips, win rate and
+risk-adjusted edge are collected from the bots and shown under **Live → Performance** in the web
+UI; the endpoint behind it is deliberately outside the `/api/v1` contract while its shape settles.
+Point the user at the page rather than inventing a figure — and note the platform stores no live
+P&L at all, so the broker account remains the source of truth for money.
+
 **Three launch options worth raising, because users don't know they exist:**
 * **`symbols`: a basket in one bot.** Two or more entries trade the whole basket in one process on
   one shared timeframe, counting as **one** job against the quota. **Pro plan and above** (`403` on
   free), and not available on `ibkr`, `lightspeed` or `propfirm` (`400`). One bot per symbol is
   still the more controllable shape — each has its own log, position and stop.
+* **`mode: "portfolio"`: run the strategy's basket as one book.** Worth raising whenever a user
+  sends a basket with `percent_of_equity` sizing, because a basket gives EVERY leg the full
+  account to size against — three legs at 100% try to deploy 300% of the account, and the broker
+  rejects whatever does not fit. A portfolio caps the legs' combined gross exposure at
+  `leverage x account equity` (default 1.0) instead. **Send no symbols**: the legs are the
+  strategy's own `request.security` universe (`GET /strategies/{id}/universe` — show the user that
+  list before launching), 2–5 of them. Refused if the broker reports no equity; `leverage > 1.0`
+  refused on Bitstamp (spot cannot borrow).
 * **`options_routing`: let a model pick shares, calls or puts per signal.** **Alpaca only** (`400`
   elsewhere), and it forces `execute_orders=false` because the options runtime places every order.
   Tune it per bot with `options_params` (`capital`, `risk_frac`, `min_dte`/`max_dte` — floored at 1,
