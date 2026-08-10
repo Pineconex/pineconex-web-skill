@@ -439,6 +439,56 @@ paths:
             contacted, so this is never a disguised "broker not connected". Live trading itself
             is not plan-gated.
 
+  /api/v1/jobs/live/snapshot:
+    get:
+      operationId: getFleetSnapshot
+      tags: [Jobs]
+      summary: Read the saved fleet snapshot (one per user, the last one saved).
+      responses:
+        "200":
+          description: >-
+            The snapshot. taken_at is null when none was ever saved.
+            running_not_in_snapshot > 0 means live bots are running that this snapshot does not
+            hold, i.e. it is stale — it is never refreshed silently.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetSnapshot" }
+    post:
+      operationId: saveFleetSnapshot
+      tags: [Jobs]
+      summary: Save the running live bots as the fleet snapshot, replacing any previous one.
+      description: >-
+        Captures every live job in running/pending. Saving while NOTHING is running stores an
+        EMPTY snapshot, which is how a snapshot is discarded — there is no delete endpoint. That
+        is the one destructive call here and the saved fleet cannot be recovered, so confirm with
+        the user before saving an empty snapshot over a non-empty one.
+      responses:
+        "200":
+          description: The snapshot as saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetSnapshot" }
+
+  /api/v1/jobs/live/snapshot/restore:
+    post:
+      operationId: restoreFleetSnapshot
+      tags: [Jobs]
+      summary: Start every bot in the snapshot that is not already running. Trades real accounts.
+      description: >-
+        The remedy for a runner host reboot, which kills every live container. Relaunches the
+        ORIGINAL job rows, so each bot keeps its output directory, rotated broker tokens and fills
+        ledger; restoring twice is safe (the second call reports already_running). Nothing here is
+        automatic: after a real outage the broker credentials are gone too, so the user must
+        reconnect their broker BEFORE restoring or every bot fails on authentication. A partial
+        restore is the normal outcome — report results[] per bot, not just the totals.
+      responses:
+        "200":
+          description: Per-bot outcome.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRestoreReport" }
+        "400": { description: No saved snapshot to restore. }
+
   /api/v1/jobs/{id}:
     parameters:
       - $ref: "#/components/parameters/PathId"
@@ -1047,6 +1097,87 @@ components:
         updated_at: { type: string, format: date-time }
         github_stem: { type: string, nullable: true }
         params_json5: { type: string, nullable: true }
+        locked:
+          type: string
+          nullable: true
+          description: >-
+            Why this strategy is write-protected right now, or absent when it is editable. Set
+            while a live bot is running it, or while it is held in the fleet snapshot. PUT code,
+            PUT params and DELETE all return 400 with this message. A bot runs the code it was
+            launched with — the source is copied into the container at launch and never re-read —
+            so an edit could not reach the running bot anyway; it would only make the file
+            disagree with what is trading. Never set on GitHub-backed strategies: those are
+            already read-only here and the file is not ours to protect.
+        live_bots:
+          type: integer
+          description: >-
+            Live bots running this strategy right now. Either/or with last_live_run — while bots
+            are up, "now" is the answer and the date is stale. Never present both.
+        last_live_run:
+          type: string
+          format: date-time
+          nullable: true
+          description: When it last went live. Only meaningful while live_bots is 0.
+    FleetSnapshot:
+      type: object
+      description: The user's single saved fleet snapshot — the last one they saved.
+      properties:
+        taken_at: { type: string, format: date-time, nullable: true }
+        restorable:
+          type: integer
+          description: How many entries a restore would actually start.
+        running_not_in_snapshot:
+          type: integer
+          description: >-
+            Live bots running that this snapshot does NOT hold. Non-zero means it is stale; the
+            snapshot is never refreshed behind the user's back.
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              job_id: { type: string, format: uuid }
+              strategy_name: { type: string, nullable: true }
+              symbol: { type: string, nullable: true }
+              tickers:
+                type: array
+                nullable: true
+                items: { type: string }
+                description: Present for basket / portfolio bots.
+              timeframe: { type: string, nullable: true }
+              broker: { type: string, nullable: true }
+              status:
+                type: string
+                description: The job's status now, or "missing" when the row is gone.
+              error_message: { type: string, nullable: true }
+              restorable: { type: boolean }
+    FleetRestoreReport:
+      type: object
+      description: >-
+        Per-bot outcome of a restore. A PARTIAL restore is the normal case — report results[],
+        not just the totals.
+      properties:
+        restored: { type: integer }
+        already_running: { type: integer }
+        failed: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              job_id: { type: string, format: uuid }
+              symbol: { type: string, nullable: true }
+              outcome:
+                type: string
+                enum: [restored, already_running, missing, skipped, failed]
+                description: >-
+                  skipped = the plan's concurrent-job limit was reached; failed = the launch was
+                  attempted and refused (most often a broker not reconnected, or an offline
+                  runner).
+              message:
+                type: string
+                nullable: true
+                description: The real reason, verbatim. Surface it; never collapse it to "failed".
     InputSpec:
       type: object
       description: One input.* field. Shape depends on `kind`.

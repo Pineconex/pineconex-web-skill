@@ -48,9 +48,33 @@ created_at    datetime
 updated_at    datetime
 github_stem   string | null
 params_json5  string | null
+locked        string | null   (absent when editable — see below)
+live_bots     int             (live bots running this strategy right now)
+last_live_run datetime | null (when it last went live; only meaningful while live_bots == 0)
 ```
 
+**`locked` — write protection.** A strategy is write-protected while a live bot is running it, or
+while it is held in the fleet snapshot. `PUT /strategies/{id}`, `PUT /strategies/{id}/params` and
+`DELETE /strategies/{id}` all return `400` with `locked` as the message. The reason: a bot runs the
+code it was launched with — the source is copied into the container at launch and never re-read —
+so editing under a running bot cannot change what is trading, it only makes the file disagree with
+the account. The snapshot extends the same rule forward: a restore relaunches from this file, so an
+edit while the bots are down changes what Restore will start.
+
+`live_bots` and `last_live_run` are an **either/or**: while bots are running, "now" is the answer
+and the date is stale. Never present both.
+
+Only set for strategies **hosted on PineconeX**. A GitHub-backed strategy (`github_stem` non-null)
+is never locked or counted here — those rows are already read-only through the API, and the file
+itself lives somewhere this platform does not control.
+
 ### GET /api/v1/strategies/{id} — get one   ·   PUT /api/v1/strategies/{id} — update (`{code}`)   ·   DELETE /api/v1/strategies/{id}
+
+All three writes (`PUT` code, `PUT` params, `DELETE`) return **`400` with the `locked` message**
+while the strategy is running on a live bot or held in the fleet snapshot. Check `locked` on the
+`StrategyResponse` before offering to edit — and when a write is refused, do not retry it or work
+around it: the correct advice is to stop the bot, or to take a new snapshot that excludes it.
+GitHub-backed strategies are never lockable and are already read-only through the API.
 
 ### GET /api/v1/strategies/{id}/inputs
 Response: array of input specs (the strategy's `input.*` variables), used to build parameter
@@ -74,6 +98,10 @@ universe *and* legs bound to `input.string` variables.
 
 ### GET /api/v1/strategies/{id}/params → `{ "params_json5": string|null }`
 ### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
+
+Write-protected with the code, and for the same reason: the params travel with the `.pine` and a
+live bot froze both at launch. Returns `400` with the `locked` reason when the strategy is live or
+in the fleet snapshot.
 
 The `params_json5` value is a **JSON5** document (comments + trailing commas allowed) shaped as an
 **array of per-symbol entries**, each with a `configs` array — every config runs a separate backtest
@@ -986,6 +1014,71 @@ a stop-loss is a sell, and a sell with no position behind it can *open a short*)
 is left alone and named in the log as unprotected — closing it is the user's call, in their broker.
 Relaunching re-adopts and re-protects the position. Never tell a user that stopping the bot
 flattened them.
+
+### Fleet snapshot — save the running live bots, restore them after an outage
+
+A live bot is a container on a runner host. The API and the runner process can each restart without
+disturbing one, but a **host reboot or a Docker daemon restart kills every bot** — no container
+carries a restart policy — and the user is left re-launching each one by hand. The snapshot is the
+manual remedy: save what is running, start it all again in one call afterwards.
+
+**Every operation is explicit. Nothing restores itself, and that is deliberate** — the broker
+credentials do not survive a long outage either (a Saxo refresh chain is dead after an hour, and a
+logout scrubs the token rows), so an automatic restore would fire N doomed launches at dead
+credentials. Reconnecting the broker is what makes a restore able to succeed, and only the user
+knows when that has happened. **Tell the user to reconnect their broker before restoring.**
+
+There is exactly **one snapshot per user — the last one saved.** Saving replaces it wholesale.
+
+#### GET /api/v1/jobs/live/snapshot
+```
+taken_at                datetime | null   (null = never saved)
+entries[]               one per saved bot
+  job_id                uuid
+  strategy_name         string | null
+  symbol                string | null
+  tickers               string[] | null   (basket / portfolio bots)
+  timeframe             string | null
+  broker                string | null
+  status                current job status, or "missing" if the row is gone
+  error_message         string | null     (why it last stopped)
+  restorable            bool              (row exists and is not already up)
+restorable              int               (how many a restore would start)
+running_not_in_snapshot int               (live bots running that this snapshot does NOT hold)
+```
+`running_not_in_snapshot > 0` means the snapshot is **stale** — the user has launched bots since
+saving. It is never refreshed silently; tell them to save again if they want those included.
+
+#### POST /api/v1/jobs/live/snapshot — save/replace from what is running now
+Returns the same shape as `GET`. Captures every live job in `running`/`pending`.
+
+**Saving with nothing running stores an empty snapshot, and that is how a snapshot is discarded**
+(stop the bots, then save). There is no delete endpoint — one rule, not two. It is also the only
+destructive call here, and the page looks exactly like that right after an outage, so **confirm
+with the user before saving an empty snapshot over a non-empty one.**
+
+#### POST /api/v1/jobs/live/snapshot/restore — start everything in it that is not already up
+```
+restored         int
+already_running  int
+failed           int
+results[]
+  job_id   uuid
+  symbol   string | null
+  outcome  "restored" | "already_running" | "missing" | "skipped" | "failed"
+  message  string | null   (the real reason — a disconnected broker, an offline runner, the quota)
+```
+**A partial restore is the normal outcome** — report `results[]` per bot, never just the totals. A
+bot skipped on the plan's concurrent-job limit reads `skipped`; a broker that has not been
+reconnected reads `failed` with the broker's own error.
+
+It **relaunches the original job rows** (same job ids), so each bot keeps its output directory,
+rotated broker tokens and fills ledger. Restoring resets that job's auto-restart counter, clears
+its stored error, and books a `restarted` bot event. Restoring twice is safe — the second call
+reports `already_running`.
+
+Every strategy in the snapshot is **write-protected** while it is saved there (see `locked` on
+`StrategyResponse`).
 ### POST /api/v1/jobs/{id}/analyse — AI (descriptive) analysis of results
 Request: `{ "provider": "gemini"|"mistral"|null }` (null = the server default; see
 `GET /api/ai/providers`). The job must be `completed`.
