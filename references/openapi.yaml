@@ -314,11 +314,13 @@ paths:
     post:
       operationId: launchPortfolioBacktest
       tags: [Jobs]
-      summary: Launch a portfolio (shared-account book) backtest.
+      summary: Launch a portfolio (shared-account book) backtest. Pro plan or higher.
       description: >-
         One strategy run across N symbols against ONE shared account. The universe is the
         strategy's own request.security basket (array.from(...)), so there is no symbol field.
         400 if the universe resolves to fewer than 2 tradable legs.
+        Requires a Pro plan or higher (403 otherwise) — it is the multi-symbol job the pricing
+        page excludes from Free, and it is N instruments of work per launch.
       requestBody:
         required: true
         content:
@@ -335,11 +337,12 @@ paths:
     post:
       operationId: launchPortfolioSweep
       tags: [Jobs]
-      summary: Launch a portfolio (shared-account book) parameter sweep.
+      summary: Launch a portfolio (shared-account book) parameter sweep. Pro plan or higher.
       description: >-
         Sweep a strategy's //@sweep inputs while it runs across the shared-account book. Each
         trial is a full book run; results are the same SweepResults shape as /jobs/sweep. 400 if
         the strategy has no //@sweep parameters or its universe resolves to fewer than 2 legs.
+        Requires a Pro plan or higher (403 otherwise), same gate as /jobs/portfolio-backtest.
       requestBody:
         required: true
         content:
@@ -407,8 +410,11 @@ paths:
       tags: [Jobs]
       summary: Launch a live trading bot. Trades a real broker account — confirm intent first.
       description: >-
-        Available on EVERY plan, free included — live trading is not plan-gated. What a tier buys
-        is capacity: bots draw on the same concurrent-job quota as every other job type.
+        Available on EVERY plan, free included — live trading itself is not plan-gated. What a
+        tier mostly buys is capacity: bots draw on the same concurrent-job quota as every other
+        job type. Three OPTIONS here are gated: symbols/mode (basket and portfolio) and
+        webhook_url need Pro, and htf_timeframe — or a strategy whose own request.security reads
+        a second timeframe — needs Premium.
       requestBody:
         required: true
         content:
@@ -420,11 +426,18 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
+        "400":
+          description: >-
+            A field the plan does not include, with a message naming it: webhook_url on a free
+            account ("webhook signals are included in Pro"), or a second timeframe on free/pro
+            ("multi-timeframe strategies are included in Premium"). Also the concurrent-job quota
+            message, which is the quota rather than the tier.
         "403":
           description: >-
-            The concurrent-job quota is full, or a multi-symbol basket (`symbols` with ≥2 entries)
-            was requested on the free plan — baskets are Pro and above. Live trading itself is not
-            plan-gated.
+            A multi-symbol basket (`symbols` with ≥2 entries) or `mode` of basket/portfolio was
+            requested on the free plan — both are Pro and above. Refused before the broker is
+            contacted, so this is never a disguised "broker not connected". Live trading itself
+            is not plan-gated.
 
   /api/v1/jobs/{id}:
     parameters:
@@ -1067,7 +1080,7 @@ components:
             equities + US-dollar crypto pairs, crypto history starts 2021-01-01. bitstamp:
             crypto (USD + EUR) — no account needed, timeframes 1m/5m/15m/30m/60m/1D, and the
             ONLY source for deep intraday crypto history (public series back to 2011).
-        htf_timeframe: { type: string, nullable: true }
+        htf_timeframe: { type: string, nullable: true, description: "Higher timeframe for request.security. PREMIUM: sending this on free/pro is a 400 naming the plan, and so is a strategy whose own request.security reads a timeframe other than the chart's — the server derives the HTF from the strategy when this is omitted, so leaving it out does not avoid the gate." }
         htf_data_source: { type: string, nullable: true }
         intrabar_timeframe: { type: string, nullable: true }
         intrabar_data_source: { type: string, nullable: true }
@@ -1089,7 +1102,7 @@ components:
           properties:
             mode: { type: string, enum: [grid, random, rbf, monte_carlo], description: "bayesian was REMOVED 2026-07-13, along with the simulated annealing that was then called monte_carlo (both failed a blind-random control at equal budget: annealing scored worse than random, bayesian tied it); sending bayesian returns 400. monte_carlo was REINTRODUCED 2026-08-02 as a different algorithm, the cross-entropy method: it samples a population per round, keeps the best fifth, refits its sampling distribution to those, and repeats. It evaluates a round's candidates in parallel (rbf cannot, since it refits a surrogate after every point) and it STOPS EARLY once the distribution only proposes parameter sets it has already tested, so a finished job may report fewer trials than requested. Do not read either steered mode as better than random: on 5 instruments x 3 seeds at equal budget, rbf beat blind random by +0.68 and monte_carlo by +0.38 net PnL %, and neither margin is statistically distinguishable from zero." }
             trials: { type: integer, nullable: true, description: "Evaluations for random/rbf/monte_carlo (rbf and monte_carlo call it the budget). Grid derives its count from minval/maxval/step." }
-            metric: { type: string, default: net_pnl_pct, description: "The objective the search hill-climbs. One of net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate, max_dd_pct (minimised) — or a custom expression 'expr: <formula>' over the trial metrics (variables: net_pnl_pct, max_dd_pct, trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd; operators + - * / ( )), maximised as written, e.g. 'expr: net_pnl_pct - 0.5 * max_dd_pct'. ONLY rbf and monte_carlo steer — grid enumerates every cell and random samples blindly, so both ignore it (not an error, just no effect). Requires the strategy to have //@sweep params (400 otherwise)." }
+            metric: { type: string, default: net_pnl_pct, description: "The objective the search hill-climbs. One of net_pnl_pct, return_over_dd, sharpe, profit_factor, expectancy, win_rate, max_dd_pct (minimised) — or a custom expression 'expr: <formula>' over the trial metrics (variables: net_pnl_pct, max_dd_pct, trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd, bars_in_trade, time_in_market_pct, effective_exposure_pct; operators + - * / ( )), maximised as written, e.g. 'expr: net_pnl_pct - 0.5 * max_dd_pct'. To price holding time, total bars held is bars_in_trade * trades, e.g. 'expr: net_pnl_pct - 0.02 * bars_in_trade * trades'. ONLY rbf and monte_carlo steer — grid enumerates every cell and random samples blindly, so both ignore it (not an error, just no effect). Requires the strategy to have //@sweep params (400 otherwise)." }
             min_trades: { type: integer, default: 5, description: "A trial with fewer closed trades can never win — not in the search, not in the results ranking. 0..1000; 0 disables. This is what makes the non-PnL objectives safe: profit factor of a config that never trades is +inf (no losses) and win rate of one lucky trade is 100%, so with no floor a PF or win-rate search converges on a strategy that refuses to trade." }
             perm_seed: { type: integer, nullable: true, description: "Sweep a bar-PERMUTED copy of the series instead of the real bars. A permutation is fully determined by its seed, so re-submitting the same sweep under N seeds builds a null distribution of the best-of-search score — an in-sample Monte Carlo permutation test. No bars cross the wire. Rejected (400) with intrabar_timeframe." }
             perm_block: { type: integer, default: 1, description: "Permutation block size in bars (1..1000). 1 = single-bar. Ignored unless perm_seed is set." }
@@ -1121,7 +1134,7 @@ components:
           properties:
             mode: { type: string, enum: [grid, random, rbf, monte_carlo], description: "Same four searches as /jobs/sweep. monte_carlo gains no parallelism here (a book run is already serial across its legs) but still stops early rather than re-buying a book run it has already evaluated, so it can return fewer trials than the budget." }
             trials: { type: integer, nullable: true, description: "random samples / rbf|monte_carlo budget. Grid derives its count from minval/maxval/step." }
-            metric: { type: string, default: net_pnl_pct, description: "The steered-search objective — same set as the sweep metric, including a custom 'expr: <formula>'. Only rbf and monte_carlo steer; grid/random ignore it." }
+            metric: { type: string, default: net_pnl_pct, description: "The steered-search objective — same set as the sweep metric, including a custom 'expr: <formula>'. Only rbf and monte_carlo steer; grid/random ignore it. Two expression variables degrade on a book rather than erroring: effective_exposure_pct is always 0 (the legs share one ledger, so per-symbol exposure has no book meaning) and time_in_market_pct saturates at its 100 clamp once legs overlap. Use bars_in_trade to price holding time here." }
             min_trades: { type: integer, default: 5, description: "Book-wide closed-trade floor (0..1000; 0 disables). A trial below it can never win." }
     RobustnessRequest:
       allOf:
@@ -1162,7 +1175,7 @@ components:
             vol_mult: { type: number, description: "0.1..10" }
             bars: { type: integer, description: Bars per synthetic path (100..5000). }
             metric: { type: string, description: "The statistic each cell is scored on, driving the median and mean layers. Not the same setting as `survival`." }
-            survival: { type: string, default: "net_pnl_pct > 0", description: "What counts as a path SURVIVING its cell, driving the frac_profitable layer. Comparisons (>, >=, <, <=) over net_pnl_pct, max_dd_pct (a positive percentage), trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd, joined by `and` (max 4). Both sides may be expressions. Examples: `net_pnl_pct > 0 and max_dd_pct < 20`, `net_pnl_pct > 2 * max_dd_pct`. A count needs a fixed line where a statistic only needs to rank, which is why this is separate from `metric`; it is fixed for the whole run and echoed in the results. Rejected at submit time if it does not parse." }
+            survival: { type: string, default: "net_pnl_pct > 0", description: "What counts as a path SURVIVING its cell, driving the frac_profitable layer. Comparisons (>, >=, <, <=) over net_pnl_pct, max_dd_pct (a positive percentage), trades, win_rate, profit_factor, expectancy, sharpe, return_over_dd, bars_in_trade, time_in_market_pct, effective_exposure_pct, joined by `and` (max 4). Both sides may be expressions. Examples: `net_pnl_pct > 0 and max_dd_pct < 20`, `net_pnl_pct > 2 * max_dd_pct`. A count needs a fixed line where a statistic only needs to rank, which is why this is separate from `metric`; it is fixed for the whole run and echoed in the results. Rejected at submit time if it does not parse." }
             seed: { type: integer, nullable: true }
             params_override: { type: object, additionalProperties: true, nullable: true, description: "The config to stress, keyed by input VARIABLE name (not title). Numbers and bools only — strings are rejected (code-injection guard). Send the same override you use for /jobs/backtest and /jobs/live: stress runs one fixed parameter set across every synthetic market, so it should be the set you actually deploy. Unlike sweep and robustness, which deliberately ignore it." }
 
@@ -1180,7 +1193,8 @@ components:
             Optional symbol BASKET. Two or more entries launch one bot that trades them all in a
             single process, on one broker account and one shared timeframe, counting as ONE job
             against the concurrency quota. Zero or one entry is an ordinary single-symbol bot.
-            Paid plans only (403 on free) and not supported on ibkr, lightspeed or propfirm (400).
+            Paid plans only (403 on free; `mode: portfolio` is on the same gate) and not
+            supported on ibkr, lightspeed or propfirm (400).
         mode:
           type: string
           enum: [single, basket, portfolio]
@@ -1207,7 +1221,7 @@ components:
             2.0 permits fully long and fully short at once and so needs a margin account that
             allows shorting. Values above 1.0 are refused on bitstamp, which cannot borrow.
         timeframe: { type: string }
-        htf_timeframe: { type: string, nullable: true }
+        htf_timeframe: { type: string, nullable: true, description: "Higher timeframe for request.security. PREMIUM: sending this on free/pro is a 400 naming the plan, and so is a strategy whose own request.security reads a timeframe other than the chart's — the server derives the HTF from the strategy when this is omitted, so leaving it out does not avoid the gate." }
         intrabar_timeframe: { type: string, nullable: true, description: "Intrabar warmup resolution fetched from the broker feed (request.security_lower_tf). Live bots have no stored dataset, so there is no separate data source." }
         execute_orders: { type: boolean, default: true }
         heartbeat_secs: { type: integer, nullable: true }
@@ -1229,7 +1243,7 @@ components:
             month resolved at launch and never rolls, and the firm's own loss limit / trailing
             drawdown can flatten and lock the account invisibly to the bot.
         saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's env is fixed when its credentials are saved." }
-        webhook_url: { type: string, nullable: true, description: http/https endpoint for order/trade/fill events. Ignored under options_routing, where the runner points the webhook at the options runtime. }
+        webhook_url: { type: string, nullable: true, description: "http/https endpoint for order/trade/fill events. PRO: a non-empty value on the free plan is a 400 naming the plan, so drop the field to launch without it. Ignored under options_routing, where the runner points the webhook at the options runtime." }
         options_routing:
           type: boolean
           default: false
