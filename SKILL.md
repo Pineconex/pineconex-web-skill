@@ -327,6 +327,31 @@ to the bot — a breach flattens every position and locks the account mid-sessio
 trades the **front month resolved at launch and never rolls**: it must be stopped and relaunched
 before expiry. There is no `propfirm` data source, so backtest from another source.
 
+### Fleet snapshot — the fix for "the server restarted and all my bots are gone"
+
+A live bot is a container on a runner host. A **host reboot or Docker daemon restart kills every
+one of them** (no container carries a restart policy), and the user comes back to an empty page.
+`POST /api/v1/jobs/live/snapshot` saves what is running; `POST /api/v1/jobs/live/snapshot/restore`
+starts it all again. One snapshot per user, the last one saved. `GET` the same path to read it.
+
+Three things to get right:
+
+* **Nothing restores automatically, and you must not simulate that.** After a real outage the
+  broker credentials are gone too (a Saxo refresh chain dies after an hour; a logout scrubs the
+  token rows), so a restore before the user reconnects their broker fails on every bot. **Ask them
+  to reconnect first**, then restore.
+* **A partial restore is normal.** Read `results[]` per bot and report the reasons — a plan's
+  concurrency limit shows as `skipped`, a broker or runner problem as `failed` with the real error.
+  "Restored 3 of 5" without the two reasons is not a useful answer.
+* **Saving with nothing running saves an EMPTY snapshot**, which is how one is discarded. There is
+  no delete endpoint. Confirm before doing that over a non-empty snapshot — the saved fleet cannot
+  be recovered.
+
+A strategy is **write-protected** while it is running live or held in the snapshot: `PUT` code,
+`PUT` params and `DELETE` all return `400`, and `StrategyResponse.locked` says why. That is not an
+obstacle to route around — a bot runs the code it was launched with, so editing it could never have
+reached the running bot anyway. Stop the bot, or re-snapshot without it.
+
 ## Crypto and Bitstamp
 
 Crypto is tradeable on **Bitstamp** (USD + EUR spot pairs) and **Alpaca** (US-dollar pairs only),
@@ -359,6 +384,7 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
 | Validate | `POST /api/v1/validate` |
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
+| Fleet snapshot | `GET/POST /api/v1/jobs/live/snapshot`, `POST /api/v1/jobs/live/snapshot/restore` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
 | Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
