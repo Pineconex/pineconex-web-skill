@@ -31,11 +31,24 @@ auth "$PINECONEX_API_URL/api/v1/strategies"
 ```
 
 If a call returns **401** the key is missing/invalid/revoked/expired — ask the user to mint a
-fresh one. **403** means either a plan quota (concurrent jobs/strategies) was hit, or the endpoint
-requires a higher plan — the only plan-gated endpoints are **robustness** and **stress**, which
-need **Premium**. Backtest, sweep and **live trading are available on every plan**, including
-free; what the tier buys is capacity (concurrent jobs), not access. **429** means a per-user rate
-limit (validation or job launches) — back off before retrying.
+fresh one. **429** means a per-user rate limit (validation or job launches) — back off before
+retrying.
+
+**403** means the endpoint is above the account's plan:
+
+- **Pro or higher** — `/jobs/portfolio-backtest`, `/jobs/portfolio-sweep`, and `/jobs/live` with
+  `symbols` (≥2) or `mode: "basket"`/`"portfolio"`.
+- **Premium or higher** — `/jobs/robustness`, `/jobs/stress`, `/models/*` and the three trainers
+  `/jobs/{hmm,clf,prf}-train`. (`dedicated` counts as Premium here; `admin` passes everything.)
+
+Some gates are a **400 with a message naming the plan** instead, because the endpoint is open and
+only one field is not: `webhook_url` on a live bot and a non-empty `telegram_bot_token` are
+**Pro**; multi-timeframe is **Premium** — which includes a strategy whose own `request.security`
+reads a second timeframe, not just an explicit `htf_timeframe`.
+
+Plain single-symbol backtest, sweep and **live trading are available on every plan**, including
+free. A **400 naming the concurrent-job limit** is the quota, not the tier — read the message
+before telling a user to upgrade.
 
 ## Guardrails — read before acting
 
@@ -100,11 +113,12 @@ against ONE shared account, and `/api/v1/jobs/portfolio-sweep` sweeps its `//@sw
 way (each trial is a full book run). Both take the strategy's own `request.security` basket as the
 universe, so they have **no `symbol` field** — instead `initial_capital` and `leverage` configure
 the shared book. portfolio-sweep uses the same `mode`/`trials`/`metric`/`min_trades` as `/sweep`
-(no `perm_seed`). Available on every plan; see `references/api-reference.md`.
+(no `perm_seed`). **Pro plan and above** (`403` on free) — a book job is N instruments of work per
+launch. See `references/api-reference.md`.
 
-**Sweep modes are `grid`, `random`, `rbf`, `monte_carlo`.** Only `rbf` and `monte_carlo` steer, so
-only they read `metric` — grid enumerates every cell and random samples blindly regardless of the
-objective. `bayesian` was removed 2026-07-13 after failing a blind-random control at equal budget,
+**Sweep modes are `grid`, `random`, `rbf`, `monte_carlo`, `successive_halving`.** `rbf`,
+`monte_carlo` and `successive_halving` read `metric`; grid enumerates every cell and random samples
+blindly regardless of the objective. `bayesian` was removed 2026-07-13 after failing a blind-random control at equal budget,
 along with the simulated annealing then named `monte_carlo` (it scored *worse* than random).
 `monte_carlo` now means the **cross-entropy method**, added 2026-08-02: it samples a population per
 round, keeps the best fifth, refits toward them, and repeats. It evaluates a round in parallel
@@ -115,7 +129,26 @@ return fewer trials than the budget asked for.
 seeds at equal budget, `rbf` was +0.68 and `monte_carlo` +0.38 net PnL % over blind `random`, and
 neither margin is statistically distinguishable from zero. Recommend `random` as a perfectly
 respectable default, `monte_carlo` when they want steering at random's wall-clock, and `grid` when
-the space is small enough to enumerate. All four work on `/jobs/portfolio-sweep` too.
+the space is small enough to enumerate. All five work on `/jobs/portfolio-sweep` too.
+
+**`successive_halving` is a cheaper way to run a search, not a better one.** It scores every
+parameter set on a short run, drops the worst half, doubles the run for the survivors, and repeats,
+so the ladder costs a fraction of evaluating everything at full length and an exhaustive grid
+becomes affordable on a space you would otherwise sample. Recommend it when the user wants the grid
+but the grid is too slow. Four things to get right when reporting one:
+
+- **Omitting `trials` selects the full grid**; setting it makes the parameter sets random samples.
+  `rounds` (default 4) is the ladder depth, and the engine shortens it when the range or the
+  parameter-set count cannot support the request. It says so in the job log.
+- **Only the last round is comparable.** Every trial carries `rung`; filter to the maximum before
+  ranking, or you will report a winner measured on a fraction of the data. Earlier rounds ship so
+  the elimination can be audited.
+- **The resource differs by route.** `/jobs/sweep` ladders the trade gate (the data is never
+  truncated, so warmup is unaffected); `/jobs/portfolio-sweep` ladders the book's legs, where an
+  early round is a filter on hopeless parameter sets and not an estimate of their scores.
+- **Never present it as reducing overfitting.** It buys compute, and by making a wider search
+  affordable it raises the multiple-testing bar rather than lowering it. `total_trials` is every
+  parameter set started, which is what MinBTL wants.
 
 **Two settings users will not think to ask for, and should:**
 * **`metric`** — the objective. Defaults to `net_pnl_pct`, which will happily buy return with
@@ -123,8 +156,13 @@ the space is small enough to enumerate. All four work on `/jobs/portfolio-sweep`
   about drawdown or consistency, set it. For anything the built-ins can't express, pass a custom
   formula: `"metric": "expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"` — variables
   `net_pnl_pct`, `max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`,
-  `return_over_dd`; operators `+ - * / ( )`. It is MAXIMISED as written (penalties get a minus
+  `return_over_dd`, `bars_in_trade`, `time_in_market_pct`, `effective_exposure_pct`; operators
+  `+ - * / ( )`. It is MAXIMISED as written (penalties get a minus
   sign; drawdown is a positive %). Works on `/jobs/sweep` (rbf, monte_carlo) and `/jobs/robustness`.
+  To price holding time, total bars held is `bars_in_trade * trades`:
+  `"expr: net_pnl_pct - 0.02 * bars_in_trade * trades"`. On a **portfolio** sweep
+  `effective_exposure_pct` is always 0 and `time_in_market_pct` saturates at 100, so use
+  `bars_in_trade` on a book.
 * **`min_trades`** (default 5) — a trial with fewer trades can never win. Do **not** set it to 0
   with `profit_factor` or `win_rate`: a config that never trades has no losses, so its profit
   factor is `+inf`, and the search will converge on a strategy that refuses to trade.
@@ -234,6 +272,9 @@ Two related things worth telling users:
        "broker":"alpaca", "webhook_url":"https://example.com/hook"
      }'
    ```
+   `webhook_url` is **Pro**: on a free account this whole call comes back `400 "webhook signals
+   are included in Pro…"`. Drop the field to launch the bot without it rather than reporting the
+   launch as impossible.
 4. Monitor: `GET /api/v1/jobs/<id>` for status, `GET /api/v1/jobs/<id>/logs` (SSE — stream it with the
    `Authorization: Bearer` header, e.g. `curl -N`). Stop with `DELETE /api/v1/jobs/<id>`.
 
@@ -256,7 +297,8 @@ P&L at all, so the broker account remains the source of truth for money.
 **Three launch options worth raising, because users don't know they exist:**
 * **`symbols`: a basket in one bot.** Two or more entries trade the whole basket in one process on
   one shared timeframe, counting as **one** job against the quota. **Pro plan and above** (`403` on
-  free), and not available on `ibkr`, `lightspeed` or `propfirm` (`400`). One bot per symbol is
+  free — `mode: "portfolio"` is on the same gate), and not available on `ibkr`, `lightspeed` or
+  `propfirm` (`400`). One bot per symbol is
   still the more controllable shape — each has its own log, position and stop.
 * **`mode: "portfolio"`: run the strategy's basket as one book.** Worth raising whenever a user
   sends a basket with `percent_of_equity` sizing, because a basket gives EVERY leg the full
@@ -316,6 +358,7 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
+| Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
 | GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |
 | Account | `GET/PATCH/DELETE /api/v1/auth/me`, `POST /api/v1/auth/telegram/test`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |

@@ -123,8 +123,12 @@ caller expressed no preference and there is nothing to act on. Rate-limited to ~
 ## ML models — **Premium plan or higher**
 
 Upload an ONNX model and call it from Pine with the `ml.*` namespace. All three endpoints are
-gated on **Premium** (`403` on any lower plan, including `pro` and `dedicated`). Models are
-private to your account.
+gated on **Premium**, `admin` or `dedicated` (`403` on `free` and `pro`). Models are private to
+your account.
+
+`dedicated` is admitted here even though its *quota* is the free tier's: on the shared platform
+that plan is a billing marker, because a Dedicated VPS customer's compute lives on their own
+instance where they are `admin`. Entitlement and compute budget are separate questions.
 
 ### GET /api/v1/models → array
 ```
@@ -158,6 +162,52 @@ concrete last dimension, output dtype `f32`/`f64`/`i64`. Unsupported operator se
 ### DELETE /api/v1/models/{id} → `204`
 Deletes the version (not the whole `name` lineage) and removes the file from every runner.
 `404` if the id is not yours.
+
+### Training a model on the platform — `POST /api/v1/jobs/{hmm,clf,prf}-train`
+Same plan gate as the rest of this section (Premium / admin / dedicated; `403` below that). These
+are **job launches**, so they answer `201` with a `JobResponse` and are polled like any other job;
+the trained model lands in the registry above under `model_name`, adding a **version** rather than
+replacing an existing lineage, so a strategy pinned to `:2` keeps working.
+
+Each trainer takes its own explicit windows, and the split is the point: the model is fitted on
+`train`, its threshold or hyper-parameters are chosen on `valid`, and `test` is scored once and
+never tuned against. `hmm-train` has no `valid` window because it has nothing to choose there.
+
+```
+POST /jobs/hmm-train    — regime model (Gaussian HMM over per-bar features)
+  symbol | universe  string | string[]   one of the two (basket feature sets take `universe`)
+  timeframe, data_source, model_name     required
+  train_from, train_to, test_from, test_to   date, required
+  states       int      optional  (default 3; capped at 6 — beyond that the states stop
+                                   having an interpretation and refits relabel them)
+  features     string   optional  (default "ret,vol")
+  lens         string   optional  ("id:len,id:len" per-feature lookbacks)
+  vol_window   int      optional
+  max_iter     int      optional
+
+POST /jobs/clf-train    — direction model (logistic regression over the next `horizon` bars)
+  symbol, timeframe, data_source, model_name                        required
+  train_from, train_to, valid_from, valid_to, test_from, test_to    date, required
+  features     string   optional
+  horizon      int      optional  (label horizon in bars)
+  label_decay, dead_band, vol_window, lens, reward, max_iter        optional
+
+POST /jobs/prf-train    — trade filter (tree ensemble scored on a STRATEGY's own trades)
+  strategy_id  uuid     required  (the filter is fitted to this strategy's trades)
+  symbol, timeframe, data_source, model_name                        required
+  features     string[] required
+  train_from, train_to, valid_from, valid_to, test_from, test_to    date, required
+  extra_series array    optional  (extra input series)
+  label, algo, universe, lens, reward, min_trades                   optional
+```
+
+A model is a fit to **one instrument, one timeframe and one stretch of history**, and the launch
+path enforces that at USE time as well: a backtest or sweep whose date range overlaps the model's
+`train_from..train_to` is refused (that would be an in-sample curve reported as a backtest), as is
+a significance or stress run on a model-pinned strategy (the fit sits outside the permutation
+loop, so the null is deflated and the p-value comes out too small), and a single-name model served
+a different symbol or timeframe. Live is exempt from the window rule only — fitting through
+yesterday to trade tomorrow is the workflow, not lookahead.
 
 ---
 
@@ -201,11 +251,27 @@ from_date, to_date    date    required   (TRADE GATE, not a data slice — see b
 data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca","bitstamp"
                                           — see Data sources below; not every source carries
                                           every symbol)
-htf_timeframe         string  optional   (higher timeframe for request.security)
+htf_timeframe         string  optional   (higher timeframe for request.security; PREMIUM)
 htf_data_source       string  optional
 intrabar_timeframe    string  optional   (request.security_lower_tf)
 intrabar_data_source  string  optional
 ```
+
+**Multi-timeframe is a Premium feature, and it is detected from the STRATEGY, not just this
+field.** Sending `htf_timeframe`, *or* running a strategy whose own `request.security` names a
+timeframe other than the chart's, is `400` on `free` and `pro`:
+
+```
+this strategy reads a second timeframe (1D) while the chart runs at 60m, and multi-timeframe
+strategies are included in Premium. Run it on a single timeframe, or upgrade.
+```
+
+Omitting the field does not avoid it — the server derives the HTF from the strategy's own
+`request.security` calls, which is what makes the ordinary Pine idiom work at all. The same check
+applies on `/backtest`, `/sweep`, `/robustness` and `/jobs/live`.
+
+A cross-symbol `request.security` at the **same** timeframe as the chart is not multi-timeframe
+and is not gated by this.
 
 **`intrabar_timeframe` is also what makes `use_bar_magnifier` do anything.** A strategy declaring
 `strategy(use_bar_magnifier = true)` resolves a bar that touches **both** a resting stop and a
@@ -231,8 +297,10 @@ Above fields, plus:
 params_override  object  optional   { var_name: number|bool }  (strings rejected)
 ```
 
-### POST /api/v1/jobs/portfolio-backtest
-One strategy run across N symbols against ONE shared account (a "book"). Every leg runs the same
+### POST /api/v1/jobs/portfolio-backtest — **Pro plan or higher**
+One strategy run across N symbols against ONE shared account (a "book"). `403` on `free`: this is
+the multi-symbol job the pricing page has always sold as a paid feature, and it is N instruments
+of work per launch rather than one. Every leg runs the same
 per-bar engine as `/backtest`, but all legs transact one ledger: closes credit shared cash,
 `percent_of_equity` sizes off the whole book, and a gross-exposure cap bounds combined long+short.
 The universe is the strategy's OWN `request.security` basket (declared in Pine with
@@ -255,8 +323,12 @@ book summary / equity / trades.
 ### POST /api/v1/jobs/sweep
 Above common fields, plus:
 ```
-mode        "grid"|"random"|"rbf"|"monte_carlo"   required
-trials      int    optional  (random/rbf/monte_carlo; rbf and monte_carlo call it the budget)
+mode        "grid"|"random"|"rbf"|"monte_carlo"|"successive_halving"   required
+trials      int    optional  (random/rbf/monte_carlo; rbf and monte_carlo call it the budget.
+                              For successive_halving it is the number of PARAMETER SETS, and
+                              omitting it is what selects the full grid — see below)
+rounds      int    optional  (successive_halving only; default 4, 1..16. Halving rounds.
+                              Ignored by the other modes)
 metric      string optional  (default "net_pnl_pct". The objective the search hill-climbs.
                               One of: net_pnl_pct | return_over_dd | sharpe | profit_factor |
                               expectancy | win_rate | max_dd_pct (minimised) — or a custom
@@ -265,6 +337,14 @@ metric      string optional  (default "net_pnl_pct". The objective the search hi
                               see below)
 min_trades  int    optional  (default 5; 0..1000. A trial with fewer closed trades can never
                               win — not in the search, not in the results ranking. 0 disables)
+stability   float  optional  (default 0 = off; 0..5. How much the objective has to hold up
+                              when the parameters move. Applies to EVERY mode — see below)
+stability_radius
+            float  optional  (default 0.12; 0..1. Neighbourhood radius as a fraction of each
+                              parameter's swept range. Ignored when stability is 0)
+bootstrap   bool   optional  (default false. Score each trial on 500 block-resamples of its
+                              OWN closed trades and rank it by the 25th percentile instead of
+                              the single run it got. Applies to EVERY mode — see below)
 perm_seed   int    optional  (sweep a bar-PERMUTED copy of the series instead of the
                               real bars — see below)
 perm_block  int    optional  (default 1; 1..1000. Permutation block size in bars.
@@ -281,6 +361,36 @@ to the single authored point and rbf exits non-zero in the container. Mark an in
 blindly: both evaluate a predetermined set of points no matter what the objective is, and you rank
 the output afterwards. Only `rbf` and `monte_carlo` hill-climb, so only they have a search to aim.
 Sending `metric` with grid/random is not an error — it simply has no effect.
+
+**`successive_halving` is a cheaper way to run a search, not a different search** (Karnin et al.
+2013; Jamieson & Talwalkar 2016). It scores every parameter set on a short run, drops the worst
+half, doubles the run for the survivors, and repeats. The set halves as the run doubles, so every
+round costs about the same and the ladder costs roughly `rounds / 2^(rounds-1)` of evaluating
+everything at full length — 3x cheaper at 5 rounds, 5x at 6.
+
+The resource is **the trade gate**, not the data. Round 1 may only open trades in the first fraction
+of the date range; the last round trades over all of it. Every parameter set still executes from the
+first bar with its full indicator history at every round, so a long lookback is not penalised early
+— which it would be if the series were truncated instead.
+
+- **`trials` selects where the parameter sets come from.** Omit it and they are the full grid, which
+  is the case the mode exists for: halving is what makes an exhaustive grid affordable. Set it and
+  they are that many random samples, for a space too large to enumerate at all.
+- **The ladder can come back shorter than `rounds`.** A first round needs at least 250 bars to trade
+  over, and once the survivor count bottoms out there is nothing left to halve. Six rounds against a
+  few years of daily bars is three in practice; against two years of 5m data it is six. The job log
+  says when it was shortened and why.
+- **`metric` DOES apply**, unlike grid and random. The objective decides which parameter sets are
+  eliminated, so changing it changes the answer.
+- **Every trial in `results.json` carries `rung` (1-based) and `rung_resource`.** Only the last
+  round's trials ran on the full range, and only they are comparable with each other. Filter to
+  `rung == max(rung)` before ranking, or you will pick a winner measured on a fraction of the data.
+  The earlier rounds are shipped so the elimination can be audited, not so it can be ranked.
+- **`total_trials` is every parameter set STARTED**, not the evaluations spent and not the survivors.
+  That is the count the MinBTL arithmetic wants. Halving does not make a winner more trustworthy; by
+  making a wider search affordable it makes the multiple-testing bar higher, not lower.
+- Robustness (`stability`) is annotated over the last round alone, since an e-ball spanning rounds
+  would average scores measured on different amounts of data.
 
 **`monte_carlo` is the cross-entropy method, not the simulated annealing that carried this name
 until 2026-07-13.** It samples a population of candidates each round, keeps the best fifth of them,
@@ -303,13 +413,100 @@ annealing mode lost to random consistently, and these two do not.
 
 **Custom objective: `"metric": "expr: <formula>"`.** An arithmetic expression over the trial
 metrics, e.g. `"expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"`. Variables: `net_pnl_pct`,
-`max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`, `return_over_dd`
-(aliases: `pnl`, `dd`/`max_dd`, `n_trades`, `winrate`, `pf`, `romad`). Operators: `+ - * / ( )` and
+`max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`, `return_over_dd`,
+`bars_in_trade`, `time_in_market_pct`, `effective_exposure_pct` (aliases: `pnl`, `dd`/`max_dd`,
+`n_trades`, `winrate`, `pf`, `romad`, `bars_held`, `time_in_market`, `exposure`). Operators:
+`+ - * / ( )` and
 numeric literals. The search MAXIMISES the expression as written — a penalty term gets a minus
 sign, and `max_dd_pct` is a positive percentage (a 12% drawdown is `12`), so subtract it to punish
 risk. A malformed expression is rejected 400 with the parser's error. The `min_trades` floor
 applies to custom objectives too, and a division by zero disqualifies the trial rather than
 winning by infinity.
+
+**Pricing holding time.** The last three variables are the handles for "this edge is not worth the
+time it takes". Total bars held is `bars_in_trade * trades`, so a per-bar holding cost is one term:
+`"expr: net_pnl_pct - 0.02 * bars_in_trade * trades"`. This is how a per-step penalty from a
+reinforcement-learning reward is carried over — a sweep scores a finished backtest rather than a
+trajectory, so there is no per-bar hook, but the episode sum of a constant per-bar cost is exactly
+that product. Two of the three degrade on a **portfolio** sweep rather than erroring, the same way
+the basket variables degrade on a single instrument: `effective_exposure_pct` is `0` on a book (its
+legs share one ledger, so per-symbol exposure has no book meaning) and `time_in_market_pct`
+saturates at its `100` clamp once legs overlap. On a book, use `bars_in_trade`.
+
+**`stability` is a second axis, not another objective.** `metric` says what "good" means for one
+trial; `stability` says how much of that good has to survive the parameters being slightly wrong.
+Each parameter set is scored by its *neighbourhood* — the mean of the objective over a ball of
+radius `stability_radius` (a fraction of each axis's swept range), minus `stability` times the
+standard deviation across that ball. `0` is the raw objective and the historical behaviour; `1`
+ranks roughly by a neighbourhood's downside; higher trades height for flatness.
+
+No custom `expr:` can express this, and that is the point of a separate field: an expression is
+evaluated over a single trial's own numbers, and whether a result sits on a plateau or a spike is a
+property of its *neighbours*.
+
+**Unlike `metric`, it applies to every mode — but it does two different things.** On `rbf` and
+`monte_carlo` it changes the SEARCH: rbf reads its surrogate as a local average rather than at a
+point, and monte_carlo picks its elites by neighbourhood, so the run spends its budget hunting
+plateaus. Neither costs a single extra backtest. On `grid` and `random` there is nothing to steer,
+so it only scores the trials afterwards — which is sound precisely there, because those two sample
+the *space* rather than the objective and so contain their plateaus at even density already.
+
+Every trial in `results.json` carries the outcome, whether or not the run was steered:
+
+```json
+"plateau": { "score": 25.81, "mean": 25.85, "sd": 0.04, "win_frac": 1.0, "n": 8 }
+```
+
+`n` is the ball's population including the trial itself. **When `n` is below 3 the ball measured
+nothing and `score` falls back to the trial's own value** — so rank on `score` only among trials
+with `n >= 3`, or an isolated spike wins by never having been examined. `results.robust` records
+the `eps` / `lambda` used and whether the search was `steered`.
+
+Measured on a real run (monte_carlo, 120 trials, DBK 1D): the raw winner returned 31.44% sitting in
+a ball with `sd` 3.03, while the stability winner returned 25.89% with `sd` 0.04. That is the trade
+the number buys — 5.5 points of in-sample return for a neighbourhood that is flat.
+
+**`bootstrap` is the THIRD axis, and it catches what `stability` structurally cannot.** `stability`
+perturbs the parameters and holds the data fixed. `bootstrap` perturbs the data and holds the
+parameters fixed: each trial's own closed trades are resampled 500 times in blocks, the objective is
+evaluated inside every resample, and the trial is ranked by the 25th percentile of those 500 values.
+
+The gap matters because **every trial in a neighbourhood runs on the same bars**. A parameter region
+built on one lucky stretch of history is wide, flat and entirely fake, and the ε-ball rates it
+highly precisely because all the neighbours caught the same luck. Only resampling sees it.
+
+Like `stability` and unlike `metric` it applies to every mode: `rbf` and `monte_carlo` steer on the
+resampled score, `grid` and `random` have their trials annotated with it and the results ranking
+uses it. Order of operations is load-bearing — the whole objective is evaluated *inside* each
+resample and one quantile is taken at the end. Bootstrapping each metric separately and evaluating
+an `expr:` on the per-metric quantiles gives a number matching no actual resample, and gets the sign
+backwards the moment terms are mixed (a bad world has low `net_pnl_pct` *and* deep `max_dd_pct`, so
+the two want opposite tails).
+
+It is a flag with nothing to configure, deliberately: the resample count converges, the quantile is
+fixed at the 25th percentile, and the block length is derived per trial from the trade sequence's
+own lag-1 autocorrelation. Any of them exposed would be a dial to turn until the strategy looked
+good. Blocks rather than single trades because consecutive trades are not independent — a trending
+stretch produces several winners in a row, and shuffling one at a time would destroy exactly that
+and make every strategy look more robust than it is.
+
+Every trial that had enough trades to resample carries:
+
+```json
+"bootstrap": { "score": 18.42, "mean": 24.10, "sd": 4.88, "win_frac": 0.97, "block": 3 }
+```
+
+`score` is what to rank by. A trial with **no** `bootstrap` key had too few trades to resample; that
+is "not measured", never "measured as bad", and such trials are excluded from winning rather than
+scored as zero. `block` of 1 means the trades showed no serial dependence and the resampling was the
+ordinary iid bootstrap.
+
+Two honest caveats. The resampled `max_dd_pct` is the drawdown of *that ordering*, stepped trade to
+trade, while the trial's own `max_dd_pct` is measured bar by bar and includes open-position
+mark-to-market — expect the resampled one to run shallower, and do not read them as the same number.
+And resampling reduces the *variance* of each trial's score, which shrinks how inflated the winner
+is (the expected max of N draws sits near `mean + sd*sqrt(2 ln N)`), but it does not make the winner
+unbiased. It creates no information; the MinBTL / deflation arithmetic still applies on top.
 
 **`min_trades` is what makes the non-PnL objectives safe.** Profit factor is gross profit / gross
 loss, so a config that *never trades* has no losses and scores `+inf`; win rate has the same trap
@@ -348,7 +545,9 @@ Rejected with 400 if combined with `intrabar_timeframe` — sub-bar structure ca
 from permuted bars, so intra-bar fills would price against a path that does not exist. The HTF, if
 present, is re-derived by aggregating the permuted primary so the two series stay coherent.
 
-### POST /api/v1/jobs/portfolio-sweep
+### POST /api/v1/jobs/portfolio-sweep — **Pro plan or higher**
+`403` on `free`, for the same reason as `/portfolio-backtest`, times the trial count.
+
 Sweep a strategy's `//@sweep` inputs while it runs across the whole book — the same shared-account
 universe as `/portfolio-backtest`. Every trial is a full book run, and results.json is the same
 `SweepResults` shape as `/sweep`, so the same trials table renders it.
@@ -356,14 +555,25 @@ universe as `/portfolio-backtest`. Every trial is a full book run, and results.j
 Common fields EXCEPT `symbol` / `htf_*` / `intrabar_*`, plus the book fields (`initial_capital`,
 `leverage` — see `/portfolio-backtest`) and the search fields:
 ```
-mode        "grid"|"random"|"rbf"|"monte_carlo"   required
-trials      int    optional  (random samples / rbf|monte_carlo budget)
+mode        "grid"|"random"|"rbf"|"monte_carlo"|"successive_halving"   required
+trials      int    optional  (random samples / rbf|monte_carlo budget. For successive_halving
+                              it is the number of parameter sets; omit it for the full grid)
+rounds      int    optional  (successive_halving only; default 4, 1..16)
 metric      string optional  (steered-search objective; same set as /sweep, including
-                              "expr: <formula>". Only rbf and monte_carlo steer —
-                              grid/random ignore it)
+                              "expr: <formula>". rbf, monte_carlo and successive_halving
+                              read it — grid/random ignore it)
 min_trades  int    optional  (default 5; 0..1000. Book-wide closed-trade floor)
 ```
-No `perm_seed` / `perm_block`: in-sample permutation is single-instrument only. All four search
+**`successive_halving` here ladders the BOOK'S LEGS, not the trade gate.** Round 1 runs each
+parameter set on one leg, round 2 on two, the last on the whole book, and capital is scaled to the
+leg count so the money behind each leg is the same at every round. Read the early rounds as a
+**filter, not an estimate**: a book's legs share one account, so a two-leg book is a different book
+rather than a small sample of the full one. What an early round establishes is that a parameter set
+was hopeless, never what it would have scored on the full book. Everything else matches the
+single-instrument mode: `rounds` defaults to 4, omitting `trials` selects the full grid, trials carry
+`rung`/`rung_resource`, and only the last round is comparable across parameter sets.
+
+No `perm_seed` / `perm_block`: in-sample permutation is single-instrument only. All five search
 modes do work here. Same rules as the other sweep and the portfolio backtest apply — **400** if the
 strategy has no `//@sweep` parameters, and **400** if its universe resolves to fewer than 2 tradable
 legs. Trials run serially (a book run is heavier than a single symbol), so keep grids modest on a
@@ -587,9 +797,14 @@ results written before 2026-08-10, and `survival` from those written before 2026
 used the default.
 
 ### POST /api/v1/jobs/live — available on **every plan** (free included)
-Live trading is not plan-gated. What a tier buys is *capacity* — live bots draw on the same
-concurrent-job quota as everything else (free 1, higher tiers more), so a `403` here means the
-quota is full, not that the plan is too low.
+Live trading itself is not plan-gated. What a tier mostly buys is *capacity* — live bots draw on
+the same concurrent-job quota as everything else (free 1, higher tiers more), so a rejection
+naming the concurrent-job limit is the quota, not the tier.
+
+Three OPTIONS on this endpoint are gated, though, so a `403`/`400` here is not always the quota:
+`symbols` / `mode` (basket and portfolio, **Pro**), `webhook_url` (**Pro**), and `htf_timeframe`
+or a multi-timeframe strategy (**Premium**). Each is refused before the broker is contacted, so
+the message names the plan rather than a missing broker connection.
 ```
 strategy_id         uuid    required  (must be validated — `status: "valid"` — or 400)
 symbol              string  required  (the primary symbol; with `symbols`, its first element)
@@ -605,7 +820,7 @@ timeframe           string  required  (live subset: "5m","15m","30m","60m","90m"
                                        weekly/monthly/1m. "1H"→60m and "4H"→240m are aliased,
                                        but 240m is not in the live subset, so 1D/90m/60m/30m/
                                        15m/5m are the six that actually launch)
-htf_timeframe       string  optional
+htf_timeframe       string  optional  (PREMIUM — see the multi-timeframe note above)
 intrabar_timeframe  string  optional
 execute_orders      bool    optional  (default true; false = signals + webhooks, no broker orders)
 heartbeat_secs      int     optional
@@ -614,7 +829,7 @@ params_override     object  optional  { var_name: number|bool }
 broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp"
                                        |"propfirm")
 saxo_env            string  optional  ("sim"|"live"; Saxo only)
-webhook_url         string  optional  (http/https; receives order/trade/fill events)
+webhook_url         string  optional  (http/https; receives order/trade/fill events; PRO)
 options_routing     bool    optional  (default false; ALPACA ONLY — see below)
 options_params      object  optional  (per-bot options knobs; ignored unless options_routing)
 ```
@@ -622,12 +837,15 @@ options_params      object  optional  (per-bot options knobs; ignored unless opt
 `broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
 `400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp, propfirm`.
 
-**Multi-symbol baskets (`symbols`) are a paid-plan feature.** Two or more entries launch a single
-`LiveMulti` job: one container, one process, one broker account, one shared timeframe, counting as
-**one** job against the concurrency quota. Constraints, all enforced server-side (the UI toggle is
-cosmetic):
+**Multi-symbol baskets (`symbols`) and portfolio mode are a paid-plan feature.** Two or more
+entries launch a single `LiveMulti` job: one container, one process, one broker account, one
+shared timeframe, counting as **one** job against the concurrency quota. Constraints, all enforced
+server-side (the UI control is cosmetic):
 
-- **`403`** on the free plan — pro / premium / admin only.
+- **`403`** on the free plan — pro / premium / admin / dedicated only. Asked of the REQUEST before
+  broker credentials are resolved, so an unconnected free account gets the plan refusal rather
+  than a misleading "not connected". `mode: "portfolio"` is refused on the same gate even though
+  it carries no `symbols` (its universe comes from the strategy).
 - **`400 "multi-symbol live is not supported for <broker>"`** on `ibkr` (per-symbol client id),
   `lightspeed` (a separate bot binary) and `propfirm` (a futures basket is a basket of contract
   months, each with its own front-month resolution — not exercised yet).
@@ -690,7 +908,8 @@ directional strategies; on a slow or mean-reverting one the premium decays while
 exit signal — say so before launching one for a user.
 
 Errors specific to this endpoint: `429` if you exceed 30 launches/min; `400 "Concurrent job limit
-reached (N)…"` when the plan's quota is full; `400 "<Broker> not connected: …"` when the broker
+reached (N)…"` when the plan's quota is full; `400 "webhook signals are included in Pro. …"` when a free account sends `webhook_url`;
+`400 "<Broker> not connected: …"` when the broker
 has no stored credentials; `503` when every runner in the fleet is at capacity.
 
 **The broker is not a detail — it changes what protective orders exist.** Pine is the same on
@@ -749,6 +968,9 @@ Your own jobs, newest first, hard-capped at **50**. There are no query parameter
 - **robustness** — `p_value`, `observed_stat`, `null_dist[]` (+ mean/sd/percentiles), `hurst` /
   `variance_ratio`, and the echoed `permutations` / `block_size` / `metric` / `seed`
 - **stress** — `calibration` + `cells[]` (see the stress endpoint above)
+
+  A trial also carries `plateau` when the run was annotated and `bootstrap` when it ran with
+  `bootstrap: true` — see the two robustness axes above for how to rank on either.
 
 When ranking sweep trials yourself, apply the same `min_trades` floor the search ran under (it is
 echoed in the job's `config.sweep_config.min_trades`) — otherwise you can crown a trial the
@@ -1119,11 +1341,21 @@ dedicated_vps       object | null   ({ subdomain, status }; Dedicated tier only)
 All fields optional: `email`, `phone`, `telegram_handle`, `telegram_bot_token`,
 `telegram_chat_id`, `github_linked_repo`.
 
-**Two different update semantics, which is easy to get wrong.** `telegram_*`,
-`github_linked_repo` and `email` are *coalesced* — omitting them (or sending `""`) leaves the
-stored value alone, so they cannot be cleared here. `phone` is written **unconditionally**:
-omitting it **erases** your stored phone number. Send it back on every PATCH unless you mean to
-clear it. A non-empty phone must start with `+` and hold 7–15 digits.
+**Three different update semantics, which is easy to get wrong.**
+
+- `telegram_handle`, `telegram_bot_token`, `telegram_chat_id` — **absent keeps, `""` CLEARS.**
+  Sending an empty string writes a real `NULL`, which is how you remove a stored credential.
+- `github_linked_repo` and `email` are *coalesced*: omitting them **or** sending `""` leaves the
+  stored value alone, so they cannot be cleared here.
+- `phone` is written **unconditionally**: omitting it **erases** your stored phone number. Send it
+  back on every PATCH unless you mean to clear it. A non-empty phone must start with `+` and hold
+  7–15 digits.
+
+**`telegram_bot_token` / `telegram_chat_id` are Pro.** Setting a non-empty value on `free` is
+`400 "Telegram notifications are included in Pro. …"`. Clearing them (`""`) stays open on every
+plan, so a downgraded account can always remove a credential it is no longer using — and a free
+account's live bots simply launch without notifications rather than being refused.
+`telegram_handle` is **not** gated: it is a contact field on the profile and nothing sends to it.
 
 Changing `github_linked_repo` also moves the sync webhook: it is deleted from the old repo and
 registered on the new one.
@@ -1236,14 +1468,34 @@ under `/api/admin/*`. That surface is documented separately — see the
   | `free` | 1 | 5 | 0 |
   | `pro` | 5 | unlimited | 0 |
   | `premium` | 10 | unlimited | unlimited |
+  | `dedicated` | 1 | 5 | unlimited |
 
   (The numbers are server-configurable defaults, so treat the error message as authoritative.)
-- **Plan-gated features (`403 forbidden`, no message):** **robustness** (`POST /jobs/robustness`),
-  **stress** (`POST /jobs/stress`) and the **ML model** endpoints (`/models/*`) require **Premium**.
-  The two job types are also the most expensive on the platform (a permutation test is N full
-  backtests), so the gate doubles as a cost control. Backtest, sweep and **live trading are open to
-  every plan, free included** — a rejection on `/jobs/live` is the concurrent-job quota, not the
-  tier.
+- **Plan-gated features.** Two shapes, and the shape tells you where the gate is:
+
+  **`403 forbidden` (no message)** — the whole endpoint is above your plan:
+
+  | Requires | Endpoints |
+  |---|---|
+  | **Pro** or higher | `/jobs/portfolio-backtest`, `/jobs/portfolio-sweep`, and `/jobs/live` with `symbols` (≥2) or `mode: "basket"`/`"portfolio"` |
+  | **Premium** or higher | `/jobs/robustness`, `/jobs/stress`, `/models/*`, `/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
+
+  **`400` with a message naming the plan** — the endpoint is open but one FIELD is not, so the
+  message says which and what it costs:
+
+  | Requires | Field |
+  |---|---|
+  | **Pro** | `webhook_url` on `/jobs/live`; a non-empty `telegram_bot_token` / `telegram_chat_id` on `PATCH /auth/me` |
+  | **Premium** | `htf_timeframe`, or any strategy whose own `request.security` reads a second timeframe, on `/backtest`, `/sweep`, `/robustness` and `/jobs/live` |
+
+  `admin` passes everything. `dedicated` counts as **Premium** for entitlement while keeping the
+  free tier's *quota* — on the shared platform that plan is a billing marker, because the
+  customer's compute runs on their own instance.
+
+  Backtest, sweep and **plain single-symbol live trading are open to every plan, free included** —
+  a rejection there naming the concurrent-job limit is the quota, not the tier. The Premium job
+  types are also the most expensive on the platform (a permutation test is N full backtests), so
+  those gates double as cost control.
 - **A disabled or deleted account is `401`, not `403`** — the plan is re-read from the database on
   every single request, so revoking access takes effect immediately, mid-session and mid-key.
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
