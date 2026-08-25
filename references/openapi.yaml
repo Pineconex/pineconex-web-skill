@@ -364,7 +364,9 @@ paths:
         Requires a Premium plan or higher (403 otherwise). Bar-permutes the price series N
         times, re-runs the SELECTION PROCEDURE on each (see search_mode), and reports a
         p-value on whether the edge is real structure or luck. Requires the strategy to have
-        //@sweep parameters (400 otherwise) — for every search_mode, including fixed.
+        //@sweep parameters (400 otherwise) — for every search_mode, including fixed. //@sweep is a
+        bare marker: the swept range is the input's own minval/maxval/step, never text after the
+        marker. An input with no minval/maxval covers its whole range and the grid is refused.
       requestBody:
         required: true
         content:
@@ -509,6 +511,68 @@ paths:
       responses:
         "204": { description: Stopped. }
 
+  /api/v1/jobs/{id}/wait:
+    get:
+      operationId: waitJob
+      summary: Block until a job finishes
+      description: >-
+        GET /jobs/{id} that blocks, with the same response shape. Returns within milliseconds of
+        the job reaching a terminal status. If the returned status is still non-terminal the wait
+        timed out — call again. Use this instead of polling. NOTE for ChatGPT Actions: keep
+        timeout at or below 45 so the call returns inside the Action request limit, and call
+        repeatedly.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - name: timeout
+          in: query
+          required: false
+          schema: { type: integer, default: 60, maximum: 300, minimum: 1 }
+        - name: on
+          in: query
+          required: false
+          schema: { type: string, enum: [finish, start], default: finish }
+          description: >-
+            finish waits for a terminal status; start returns as soon as the job leaves the queue.
+      responses:
+        '200':
+          description: The job. A non-terminal status means the wait timed out.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { description: No such job for this account }
+        '429': { description: Too many concurrent waits (max 32) — use POST /api/v1/jobs/wait }
+  /api/v1/jobs/wait:
+    post:
+      operationId: waitJobs
+      summary: Block until several jobs finish, on one connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  maxItems: 100
+                  items: { type: string, format: uuid }
+                mode:
+                  type: string
+                  enum: [any, all]
+                  default: any
+                timeout: { type: integer, default: 60, maximum: 300, minimum: 1 }
+                on: { type: string, enum: [finish, start], default: finish }
+      responses:
+        '200':
+          description: Every requested job's current state, in the order given.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Job' }
+        '400': { description: Empty or oversized id list }
+        '404': { description: One of the ids is not this account's }
   /api/v1/jobs/{id}/results:
     parameters:
       - $ref: "#/components/parameters/PathId"
@@ -1203,7 +1267,7 @@ components:
         data_source:
           type: string
           example: yahoo
-          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp]
+          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, wikipedia, reddit, secform4, google]
           description: >-
             A source only serves symbols it has a ticker for (see the Symbol schema); a null
             ticker is a 400. yahoo: equities + crypto, no account, but NO intraday older than
@@ -1211,6 +1275,13 @@ components:
             equities + US-dollar crypto pairs, crypto history starts 2021-01-01. bitstamp:
             crypto (USD + EUR) — no account needed, timeframes 1m/5m/15m/30m/60m/1D, and the
             ONLY source for deep intraday crypto history (public series back to 2011).
+            NON-PRICE sources, 1D only, each on its own prefixed symbol (WIKI:, REDDIT:,
+            SECFORM4:, GOOGLE:) and read in Pine by named field rather than open/close —
+            wikipedia: pageviews from 2015. reddit: post and author counts from 2005.
+            secform4: SEC insider open-market dealing in dollars from 2003, US-registered
+            issuers only (a foreign private issuer is exempt from Section 16 and never files).
+            google: search interest — NOT REPRODUCIBLE, because Google rescales every response
+            to the requested window and samples, so a re-fetch returns different history.
         htf_timeframe: { type: string, nullable: true, description: "Higher timeframe for request.security. PREMIUM: sending this on free/pro is a 400 naming the plan, and so is a strategy whose own request.security reads a timeframe other than the chart's — the server derives the HTF from the strategy when this is omitted, so leaving it out does not avoid the gate." }
         htf_data_source: { type: string, nullable: true }
         intrabar_timeframe: { type: string, nullable: true }
@@ -1246,7 +1317,7 @@ components:
         timeframe: { type: string, example: "1D", description: "1D, 1W, 240m, 60m, 30m, 15m, 5m" }
         from_date: { type: string, format: date }
         to_date: { type: string, format: date }
-        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp] }
+        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, wikipedia, reddit, secform4, google] }
         initial_capital: { type: number, default: 100000, description: "Shared book account size. percent_of_equity sizing is a share of the whole book, not per symbol." }
         leverage: { type: number, default: 2.0, description: "Gross-exposure cap as a multiple of book equity (Sum|leg notional| <= leverage x equity). 2.0 = full long + full short (dollar-neutral); 1.0 caps total exposure at the account size." }
     PortfolioBacktestRequest:
@@ -1355,6 +1426,19 @@ components:
         htf_timeframe: { type: string, nullable: true, description: "Higher timeframe for request.security. PREMIUM: sending this on free/pro is a 400 naming the plan, and so is a strategy whose own request.security reads a timeframe other than the chart's — the server derives the HTF from the strategy when this is omitted, so leaving it out does not avoid the gate." }
         intrabar_timeframe: { type: string, nullable: true, description: "Intrabar warmup resolution fetched from the broker feed (request.security_lower_tf). Live bots have no stored dataset, so there is no separate data source." }
         execute_orders: { type: boolean, default: true }
+        futures_auto_roll:
+          type: boolean
+          default: true
+          description: >-
+            FUTURES ONLY, and ignored on every other symbol. A futures contract stops trading on
+            its expiry date. True (the default) rolls the position: when the venue names a new
+            front month the bot cancels what is resting, closes at the market in the expiring
+            contract, and re-opens the same side and size in the new one (logged as
+            FUTURES_ROLL_CLOSE and FUTURES_ROLL_OPEN). That is two real market orders — you pay
+            the spread twice and inherit the price difference between the months, none of which a
+            backtest models, and a level the strategy holds in a Pine var still refers to the old
+            contract. False warns from 7 days out and then holds a contract that stops trading,
+            which is a different risk rather than a safer one.
         heartbeat_secs: { type: integer, nullable: true }
         auto_restart: { type: boolean, default: false }
         params_override: { $ref: "#/components/schemas/ParamsOverride" }
@@ -1370,9 +1454,10 @@ components:
             order id, and creates nothing, so every Bitstamp stop is SYNTHETIC (bot-side, bar
             close, on a 24/7 market) and spot is long-only. lightspeed and ibkr send market
             orders only — nothing rests, nothing protects. propfirm is CME futures through the
-            firm's gateway: live-only (no data source, no backtest path), it trades the front
-            month resolved at launch and never rolls, and the firm's own loss limit / trailing
-            drawdown can flatten and lock the account invisibly to the bot.
+            firm's gateway: live-only (no data source, no backtest path), and the firm's own loss
+            limit / trailing drawdown can flatten and lock the account invisibly to the bot. saxo
+            also trades Eurex and Euronext futures; both futures venues resolve the product root
+            to the live delivery month at launch and re-check it hourly (see futures_auto_roll).
         saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's env is fixed when its credentials are saved." }
         webhook_url: { type: string, nullable: true, description: "http/https endpoint for order/trade/fill events. PRO: a non-empty value on the free plan is a 400 naming the plan, so drop the field to launch without it. Ignored under options_routing, where the runner points the webhook at the options runtime." }
         options_routing:
@@ -1410,7 +1495,13 @@ components:
         id: { type: string, format: uuid }
         strategy_id: { type: string, format: uuid, nullable: true }
         job_type: { type: string, enum: [backtest, sweep, robustness, stress, live] }
-        status: { type: string, enum: [pending, running, completed, failed, cancelled, timeout] }
+        status:
+          type: string
+          enum: [queued, pending, running, completed, failed, cancelled, timeout]
+          description: >-
+            queued = accepted and waiting for a runner to free up; it starts on its own, so do
+            not retry the launch. pending = dispatch in flight. Terminal: completed, failed,
+            cancelled, timeout.
         container_id: { type: string, nullable: true }
         config: { type: object, additionalProperties: true }
         auto_restart: { type: boolean }
@@ -1419,6 +1510,20 @@ components:
         progress_done: { type: integer, nullable: true }
         progress_total: { type: integer, nullable: true }
         error_message: { type: string, nullable: true }
+        queue_position:
+          type: integer
+          nullable: true
+          description: Queued jobs only. 1-based, among this account's own queued jobs.
+        queue_reason:
+          type: string
+          nullable: true
+          description: Queued jobs only. Why it is waiting, in one sentence.
+        queue_eta_secs:
+          type: integer
+          nullable: true
+          description: >-
+            Queued jobs only. Rough seconds until it starts. Absent when there is no runtime
+            history for this job type to estimate from.
     Symbol:
       type: object
       description: >-
@@ -1438,6 +1543,11 @@ components:
         alpaca_us_symbol: { type: string, nullable: true, example: BTC/USD }
         saxo_uic: { type: integer, nullable: true, description: Null for crypto — Saxo cannot serve it. }
         bitstamp_pair: { type: string, nullable: true, example: btcusd }
+        wikipedia_article: { type: string, nullable: true, example: GameStop, description: "en.wikipedia article title. NOT the ticker — GME is GameStop. Null disables the wikipedia source for this symbol." }
+        reddit_query: { type: string, nullable: true, example: GME, description: "Search term for the reddit source. Tickers that are also English words need the cashtag form. Null disables it." }
+        sec_cik: { type: string, nullable: true, example: "0000789019", description: "SEC EDGAR Central Index Key of the ISSUER. Null for every non-US listing: a foreign private issuer files a 20-F and is exempt from Section 16, so it has no Form 4 at any date." }
+        google_trends_query: { type: string, nullable: true, example: NVDA, description: "Search term for the google source. NVDA and 'NVDA stock' are materially different series, so the choice is stored rather than derived." }
+        live_tradable: { type: boolean, description: "False marks a data-only row: it backtests and sweeps, but live launch refuses it." }
     BitstampCredentials:
       type: object
       required: [api_key, api_secret, env]

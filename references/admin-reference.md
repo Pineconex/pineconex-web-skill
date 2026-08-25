@@ -45,7 +45,7 @@ here:
 
 | Endpoint | Semantics | Omitting a field means |
 |---|---|---|
-| `PATCH /symbols/{id}` | **full replace** | the column is set to **NULL** — you erase it |
+| `PATCH /symbols/{id}` | **full replace**, except five fields | the column is set to **NULL** — you erase it. `live_tradable` and the four non-price mappings are exempt; see below |
 | `PATCH /settings` | **all fields mandatory** | `422` — the request is rejected |
 | `PATCH /runners/{id}`, `/vps/{id}`, `/runtime-versions/{v}` | partial (`COALESCE`) | leave it unchanged |
 
@@ -100,7 +100,7 @@ The `jobs` rows themselves are **kept**. Self-deletion is refused
 
 ## Plans and settings
 
-### GET /api/admin/settings → the thirteen platform settings
+### GET /api/admin/settings → the platform settings
 ```
 support_telegram        string   ("")
 banner_message          string   ("")   — shown site-wide to every user
@@ -110,6 +110,10 @@ free_max_strategies     int      (5)
 free_max_jobs           int      (1)
 pro_max_jobs            int      (5)
 max_max_jobs            int      (10)   — the Premium concurrent-job cap
+free_max_queued_jobs    int      (2)    — QUEUE DEPTH, not concurrency; see below
+pro_max_queued_jobs     int      (10)
+max_max_queued_jobs     int      (25)
+queue_max_wait_secs     int      (86400) — 0 = a job may wait indefinitely
 parquet_retention_days  int      (90)   — 0 disables the retention watchdog
 job_log_max_mb          int      (10)   — 0 = uncapped
 backtest_timeout_secs   int      (600)  — 0 = no timeout
@@ -117,6 +121,19 @@ sweep_timeout_secs      int      (1800) — also applies to robustness; 0 = no t
 saxo_split_adjust       bool     (false) — back-adjust Saxo bars for splits at fetch time
 ```
 (Defaults in brackets, used when the key is absent or unparseable.)
+
+**`*_max_queued_jobs` is a SEPARATE limit from `*_max_jobs`, and the split is load-bearing.** A
+launch that finds no runner with room is queued rather than refused; `*_max_jobs` counts only what
+is actually on a runner (`pending` + `running`), and these bound how many a plan may have WAITING.
+Folding them together means the free tier — one concurrent job — could never put anything IN the
+queue, so the feature would do nothing for exactly the users most likely to meet a full runner;
+not bounding them at all lets one caller enqueue hundreds. A launch over BOTH limits is refused
+`400`.
+
+`queue_max_wait_secs` fails a job that has waited longer, with the reason on the row. A queue
+with no expiry is where jobs go to be forgotten: remove a runner, or queue a job larger than
+anything left in the fleet, and its row waits forever with no symptom other than nothing
+happening.
 
 **`saxo_split_adjust` changes what every future backtest sees, and does not rewrite the past.**
 Saxo is the only unadjusted source in the fleet — its `/chart/v3/charts` takes no adjustment
@@ -130,7 +147,7 @@ overwrites the file in place and `data_catalog.split_adjusted` — surfaced to u
 on. Flip it, then re-fetch the Saxo datasets you care about.
 
 ### PATCH /api/admin/settings → `204`
-**All thirteen fields are required** — this is a whole-form replace, and a partial body is rejected
+**Every field is required** — this is a whole-form replace, and a partial body is rejected
 `422`. `GET` first, mutate, send it all back. No range validation is performed: a zero or negative
 value is stored as given, and the three `0`-means-disabled cases above are the intended use of that.
 
@@ -150,7 +167,8 @@ id, display_name, index_name, tv_symbol,
 saxo_uic (int|null), saxo_symbol, saxo_asset_type,
 yahoo_ticker, massive_ticker, ibkr_symbol, ibkr_exchange,
 alpaca_us_symbol, alpaca_eu_symbol, bitstamp_pair,
-mintick (float|null), currency, enabled (bool)
+mintick (float|null), currency, enabled (bool), live_tradable (bool),
+wikipedia_article, reddit_query, sec_cik, google_trends_query
 ```
 
 ### POST /api/admin/symbols → `201` · PATCH /api/admin/symbols/{id} → `200`
@@ -161,15 +179,36 @@ Defaults on an absent field: `saxo_asset_type` → `"Stock"`, `enabled` → `tru
 `bitstamp_pair` is trimmed and **lowercased** (Bitstamp's OHLC path is case-sensitive: `btceur`
 works, `BTCEUR` 404s); an empty string becomes NULL.
 
-**`live_tradable` is NOT settable here.** It is a symbol column (surfaced to users on
-`GET /api/v1/data/symbols`) marking a row as *data-only*: a cash index has a price series but is
-not an instrument anyone can hold, so it backtests and sweeps while live launch refuses it with a
-`400` naming a tracking ETF instead. The admin write path neither reads nor clears it, so a PATCH
-cannot flip a data-only row tradable by accident — it is set in a migration alongside the reason.
-That separation exists because populating a broker id (`saxo_uic` + `saxo_asset_type`) is what
-makes a symbol *tradable*, and index rows are mapped at the broker's leveraged **index CFD** purely
-to get bars. **When adding a symbol for its data only, ship it with `live_tradable = FALSE` in the
-same change.**
+#### Five fields are the exception to full-replace
+
+`live_tradable` and the four non-price mappings do **not** follow the erase-if-absent rule above.
+Omitting them leaves the stored value untouched. That is deliberate in both cases and for the same
+reason: a client that predates a field would otherwise wipe it while editing something unrelated.
+
+| Field | Omitted | `""` | Value |
+|---|---|---|---|
+| `live_tradable` (bool) | unchanged | — | set |
+| `wikipedia_article` | unchanged | clears | set (trimmed) |
+| `reddit_query` | unchanged | clears | set (trimmed) |
+| `sec_cik` | unchanged | clears | set (trimmed) |
+| `google_trends_query` | unchanged | clears | set (trimmed) |
+
+**`live_tradable`** marks a row as *data-only*: a cash index has a price series but is not an
+instrument anyone can hold, so it backtests and sweeps while live launch refuses it with a `400`
+naming a tracking ETF instead. Both verbatim readings are unsafe in opposite directions —
+defaulting to `true` would silently make every symbol an older client edits launchable, and
+defaulting to `false` would silently un-launch a tradable one and kill a live bot's next restart.
+Populating a broker id (`saxo_uic` + `saxo_asset_type`) is what makes a symbol *tradable*, and index
+rows are mapped at the broker's leveraged **index CFD** purely to get bars. **When adding a symbol
+for its data only, ship it with `live_tradable = false`.**
+
+**The four mappings** each gate one non-price source (`wikipedia`, `reddit`, `secform4`, `google`)
+exactly as a broker ticker gates a price source: `null` means that source is not offered for the
+symbol. None is derivable from the ticker, which is why each is stored rather than inferred:
+`GME` is `GameStop` on Wikipedia, Microsoft's CIK is `0000789019`, and `NVDA` and `NVDA stock` are
+materially different Google Trends series. `sec_cik` is the **issuer's** Central Index Key, and a
+foreign private issuer has none — it files a 20-F and is exempt from Section 16 — so leave it null
+for every non-US listing rather than mapping a CIK that will never produce a filing.
 
 ### DELETE /api/admin/symbols/{id} → `204` (`404` if unknown)
 
@@ -182,6 +221,31 @@ A null from Saxo leaves the stored value alone rather than clearing it.
 Uses **your own** Saxo session and its `sim`/`live` environment, so it needs Saxo connected on the
 calling admin account (`400 "Saxo not connected: …"` otherwise). `details[]` is one line per
 symbol, e.g. `"AAPL: tick=0.01 currency=USD"` or `"XYZ: HTTP 404"`.
+
+### GET /api/admin/symbols/saxo-search → array of hits
+
+Ask Saxo what it calls something. Query params, all optional: `keywords`, `asset_type` (default
+`Stock`), `exchange_id`, `limit` (1-400, default 50). Returns `symbol`, `description`, `uic`,
+`asset_type`, `exchange_id`, `tradable`. Uses **your own** Saxo session, same as refresh-ticks.
+
+Read-only, and deliberately so: it does not write `saxo_uic`. Choosing which listing is the right
+one is judgement — a near-ticker match on the wrong instrument is how a symbol silently ends up
+mapped to a 2x leveraged fund — so mapping stays a deliberate act via `PATCH /symbols/{id}`.
+
+Two things it does that the ordinary fetch path cannot, and both matter:
+
+- **It sees non-tradable instruments.** Saxo hides them by default, and a continuous futures line
+  (`FDXc1`) and a cash index are both non-tradable. Until 2026-08-22 the fetcher's resolver did not
+  ask for them, so it could not resolve the very instruments we map for data — every Saxo futures
+  and index `uic` on the platform had been measured by hand into a migration. Read a bare empty
+  result as "Saxo does not carry this" at your peril; that reading was wrong three times in a row
+  and only a control on a known-good instrument caught it.
+- **It enumerates.** Omit `keywords` and pass `exchange_id` to list a venue's whole universe for an
+  asset type. That is what turns absence into evidence: Euronext Amsterdam carries 7 futures, Paris
+  5, Milan 3 continuous lines, and OBX / BEL 20 / PSI 20 / AMX / ISEQ 20 return nothing anywhere.
+
+Do not assume a product root is the exchange's contract code. Saxo says `FDX` where Eurex says
+FDAX, and `AEXc1` where Euronext says FTI — measured, four of five Euronext roots diverge.
 
 ---
 
@@ -233,20 +297,43 @@ Every failure is a `400` naming the stage (`"spot: …"`, `"chain: …"`, `"X ha
 ```
 id (int), name, url, max_capacity (int),
 active_jobs (int)      — live count of that runner's running+pending jobs
+queued_jobs (int)      — jobs waiting for THIS runner
 is_active (bool),
 last_seen_at datetime|null   — stamped by the 60s health watchdog
 created_at
+mem_total_mb int|null        — host memory, as the runner reports it
+cpu_count    int|null
+mem_reserve_mb int           — memory withheld from scheduling, for the host itself
+committed_mem_mb int         — what the runner is currently holding
 ```
 `last_seen_at` going stale is the signal that a runner is gone; `is_active` is the *intent* flag
-you control. Dispatch picks the active runner with the most headroom and returns `503` when every
-one is full.
+you control. Live-bot dispatch picks the active runner with the most headroom and returns `503`
+when every one is full; batch jobs are pinned to the runner holding the Parquet catalog and are
+QUEUED rather than refused when it is full.
+
+**Scheduling is by MEMORY, not by job count.** `max_capacity` counts containers and cannot
+distinguish four backtests (2 GB) from four portfolio books (24 GB), so it is kept as a second
+ceiling while admission is `mem_total_mb - mem_reserve_mb - committed_mem_mb`. A large job can
+therefore sit queued while smaller ones launched after it start — though only for a few minutes,
+after which capacity is held for it rather than being backfilled past indefinitely.
+
+**`mem_total_mb: null` means the runner has not reported capacity yet** — unknown, not zero. The
+scheduler falls back to count-only admission there, which is the pre-queue behaviour, so a runner
+whose binary predates this keeps working rather than becoming unschedulable.
+
+**`mem_reserve_mb` (default 2048) is the knob that protects the HOST.** The on-prem runner is not
+a dedicated box, and sweeps have twice OOM-killed the editor running beside them. Lowering it
+below what is already committed is safe and self-correcting: nothing is shed, the runner simply
+admits nothing new until enough finishes.
 
 ### POST /api/admin/runners → `201`
 `{ name, url, max_capacity? }` — name and url required, capacity defaults to `5`.
 (`active_jobs` is reported as `0` in this response regardless of reality.)
 
 ### PATCH /api/admin/runners/{id} → `200`
-Optional `name`, `url`, `max_capacity`, `is_active`. Partial — omitted fields are untouched.
+Optional `name`, `url`, `max_capacity`, `is_active`, `mem_reserve_mb`. Partial — omitted fields
+are untouched. The other capacity fields are facts the runner reports about itself and cannot be
+set here.
 Setting `is_active: false` drains a runner: no new dispatch, existing jobs keep running.
 
 ### DELETE /api/admin/runners/{id} → `204`
@@ -351,9 +438,9 @@ its id, so it must then be found and killed by hand at Hetzner.
 
 ## Jobs (all users)
 
-### GET /api/admin/jobs → every user's active jobs
-`running` + `pending` only, ordered by runner. Enriched with live container CPU/memory by fanning
-out to every active runner (3s timeout; a slow runner just yields nulls).
+### GET /api/admin/jobs → every user's active AND queued jobs
+`running` + `pending` + `queued`, ordered by runner then by wait. Enriched with live container
+CPU/memory by fanning out to every active runner (3s timeout; a slow runner just yields nulls).
 ```
 id, user_id, user_email, container_id|null,
 strategy_name|null   (null when the strategy has been deleted)
@@ -361,10 +448,24 @@ job_type, status, auto_restart, created_at, finished_at|null,
 config               (the persisted job config — credentials are stripped before storage)
 cpu_pct|null, mem_pct|null      (null when no runner reported that container)
 runner_id|null, runner_name|null  (null = legacy pre-fleet job)
+cost_mem_mb|null, cost_cpu_millis|null  — what this job RESERVES on its runner
+queued_at datetime|null   — when it entered the queue; kept after it starts, so
+                            "how long did this run wait?" stays answerable
 ```
+`cost_mem_mb` is the figure the scheduler admits against, and it is why a job can be queued behind
+work that looks smaller in the job list: a portfolio book reserves 6 GB where a backtest reserves
+512 MB. This is the ONLY place that number is visible, and without it a queue holding one large
+job looks arbitrary.
+
+Ordering is round-robin by user — `(the owner's running count, queued_at)` — not FIFO, so one
+account's campaign cannot block everyone behind it. Within one user, jobs still come out in
+submission order.
 
 ### DELETE /api/admin/jobs/{id} → `204`
-Cancel any user's job. **Live jobs are soft-cancelled** — the row is kept with
+Cancel any user's job. **A queued job is dropped outright** — no container exists, so there is
+nothing to stop and nothing is lost. That delete races the scheduler's own claim on the row and
+resolves cleanly either way: if the scheduler wins, the job is admitted and this falls through to
+stopping the container it now has. **Live jobs are soft-cancelled** — the row is kept with
 `status: "cancelled"` and a `stopped` bot event, so it stays in the user's history. **Every other
 job type is hard-deleted**, along with its result files.
 
