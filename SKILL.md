@@ -84,13 +84,38 @@ before telling a user to upgrade.
        "from_date":"2020-01-01", "to_date":"2024-01-01", "data_source":"yahoo"
      }'
    ```
-4. **Poll** until terminal, then **fetch results**:
+4. **WAIT** for it, then **fetch results**. Do not poll:
    ```bash
-   auth "$PINECONEX_API_URL/api/v1/jobs/<job_id>"          # .status
-   auth "$PINECONEX_API_URL/api/v1/jobs/<job_id>/results"  # metrics JSON
+   auth "$PINECONEX_API_URL/api/v1/jobs/<job_id>/wait?timeout=300"   # blocks until done
+   auth "$PINECONEX_API_URL/api/v1/jobs/<job_id>/results"            # metrics JSON
    ```
-   Terminal statuses: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`,
-   `running`. Poll every few seconds; don't hammer.
+   `/wait` is `GET /jobs/{id}` that blocks — same response shape — and returns within
+   milliseconds of the job finishing. If the `status` it returns is still non-terminal, the wait
+   timed out: call it again. That is the whole protocol, and it is the entire loop.
+
+   `timeout` is seconds, default 60, max 300. A forty-minute sweep is therefore about eight
+   calls, each carrying a real answer, instead of several hundred that say "still running".
+
+   **Watching several jobs? One call, not N.** A fan-out (a multi-symbol scan, a set of
+   robustness runs) should use the bulk form rather than one wait per job:
+   ```bash
+   auth -X POST "$PINECONEX_API_URL/api/v1/jobs/wait" -H "Content-Type: application/json" \
+     -d '{"ids":["<id1>","<id2>"],"mode":"all","timeout":300}'
+   ```
+   `mode` is `any` (default — returns as soon as one is done) or `all`. Up to 100 ids. The
+   response is every requested job's current state, so one call is a complete picture.
+
+   Terminal statuses: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `queued`,
+   `pending`, `running`. Plain `GET /jobs/{id}` still works if you need a single snapshot without
+   blocking — just don't build a polling loop out of it.
+
+   A launch answers **`202`** with `status: "queued"` when no runner has room right now. That is
+   not an error and must not be retried — the job is accepted and starts on its own. `/wait`
+   handles it with no change on your side; `queue_reason` and `queue_eta_secs` say why it is
+   waiting and roughly how long, and **`?on=start`** returns as soon as it leaves the queue if you
+   want to distinguish "not started" from "not finished". `DELETE /api/v1/jobs/{id}` cancels a
+   queued job for free. Live bots are never queued: `POST /api/v1/jobs/live` still refuses with
+   `400` at the concurrent limit.
 
 Sweeps (`/api/v1/jobs/sweep`), robustness (`/api/v1/jobs/robustness`) and stress
 (`/api/v1/jobs/stress`) follow the same launch → poll → results shape. Robustness runs a
@@ -169,6 +194,11 @@ but the grid is too slow. Four things to get right when reporting one:
 
 **Both endpoints 400 if the strategy has no `//@sweep` parameters.** There is nothing to search.
 
+**`//@sweep` is a marker with no arguments — the swept range is the input's own
+`minval`/`maxval`/`step`.** Writing a range after the marker parses fine and is ignored; the bounds on a
+swept input ARE its search space. An input with no `minval`/`maxval` covers its whole range and the
+launch is refused with `Grid would require N combinations (limit 100000)`.
+
 **The p-value trap — read this before running a significance test on a swept winner.**
 `/jobs/robustness` defaults to `search_mode: "fixed"`, which re-runs the strategy's *authored*
 input defaults on every permutation. That null — *"what this one rule scores on noise"* — is only
@@ -197,6 +227,44 @@ if the bars are **exchangeable**, and serial dependence breaks that. `block_size
 `"auto"`, which measures the series being permuted and sizes the block from it — so **leave it
 alone**. It is a property of the instrument, not a preference, and a number you pick is a number
 you guessed.
+
+## Non-price series: attention and insider dealing
+
+Four `data_source` values carry something other than a price, on their own prefixed symbols:
+
+```
+wikipedia -> WIKI:<ticker>      pageviews, 2015+
+reddit    -> REDDIT:<ticker>    post and author counts, 2005+
+secform4  -> SECFORM4:<ticker>  SEC insider open-market dealing in dollars, 2003+, US issuers only
+google    -> GOOGLE:<ticker>    search interest (NOT reproducible, see below)
+```
+
+Fetch them exactly like price data (`POST /api/v1/data/fetch` with that `source`), then read them
+in Pine **by named field**, never `open`/`close` — a non-price series has no prices, so each of the
+five stored columns carries a different figure:
+
+```pine
+posts   = request.security("REDDIT:GME",    "1D", mentionCount)
+authors = request.security("REDDIT:GME",    "1D", distinctAuthors)
+topper  = request.security("REDDIT:GME",    "1D", topAuthorPosts)
+flow    = request.security("SECFORM4:MSFT", "1D", insiderFlowUsd)
+```
+
+The full field table is in the API reference. Four things to tell a user before they act on one:
+
+- **`insiderFlowUsd` is cumulative** — the signal is `flow - flow[90]`, not the level.
+- **Only Form 4 codes `P`/`S` count.** Grants, option exercises and tax withholding are
+  compensation mechanics; counting them is what produces the "insiders are dumping" headline.
+- **Reddit's author fields are the point.** A post count cannot separate coordinated posting from
+  interest; `topAuthorPosts / mentionCount` can.
+- **`GOOGLE:` is not reproducible.** Google rescales each response to the requested window and
+  samples, so re-fetching returns different history. Every other dataset here does not do this.
+  A backtest over it is one draw, not a measurement — say so rather than reporting it like the rest.
+
+A symbol only offers a source it is mapped for (`wikipedia_article`, `reddit_query`, `sec_cik`,
+`google_trends_query` on `GET /api/v1/data/symbols`); a null means that source is unavailable for
+it. `SECFORM4:` is **US-registered issuers only** — a foreign private issuer files a 20-F and is
+exempt from Section 16, so ASML has no Form 4 at any date.
 
 ```
 POST /api/v1/jobs/robustness   { ... }                        # auto: correct by default
@@ -320,9 +388,18 @@ P&L at all, so the broker account remains the source of truth for money.
 
 **Prop-firm futures (`broker: "propfirm"`) is live-only and unusually sharp.** The firm's daily
 loss limit, trailing drawdown and flat-by time are enforced on the *firm's* side and are invisible
-to the bot — a breach flattens every position and locks the account mid-session. The bot also
-trades the **front month resolved at launch and never rolls**: it must be stopped and relaunched
-before expiry. There is no `propfirm` data source, so backtest from another source.
+to the bot — a breach flattens every position and locks the account mid-session. There is no
+`propfirm` data source, so backtest from another source.
+
+**Futures expire, and that is the one launch where the instrument has an end.** Two venues trade
+them: `propfirm` (CME) and `saxo` (Eurex / Euronext); every other broker refuses a futures symbol,
+and both futures venues refuse a cash one. The bot resolves the product root to the live delivery
+month at launch, re-checks hourly, and warns in the job log from 7 days out. **`futures_auto_roll`
+defaults to `true`**: at the roll it closes at the market in the expiring contract and re-opens the
+same side and size in the new one. Tell the user what that costs before they leave it on — two real
+market orders, the spread twice, the price gap between months, none of it modelled by any backtest,
+and any level the strategy holds in a Pine `var` still refers to the old contract. `false` warns and
+then holds a contract that stops trading, which is a different risk rather than a safer one.
 
 ### Fleet snapshot — the fix for "the server restarted and all my bots are gone"
 
@@ -380,9 +457,9 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 |---|---|
 | Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
 | Validate | `POST /api/v1/validate` |
-| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
+| Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/wait`, `POST /api/v1/jobs/wait`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Fleet snapshot | `GET/POST /api/v1/jobs/live/snapshot`, `POST /api/v1/jobs/live/snapshot/restore` |
-| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` |
+| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` (price **and** the non-price attention/insider sources) |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
 | Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |

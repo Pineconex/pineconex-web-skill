@@ -96,8 +96,53 @@ this call is cheap and never fails on an unknown symbol; the launcher does the m
 rejects what it cannot trade. Both declaration styles resolve — a literal `array.from("A","B")`
 universe *and* legs bound to `input.string` variables.
 
-### GET /api/v1/strategies/{id}/params → `{ "params_json5": string|null }`
-### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `204`
+### GET /api/v1/strategies/{id}/params
+→ `{ "params_json5": string|null, "symbols": string[], "parse_error": string|null }`
+
+`symbols` is the file's instrument list, parsed server-side so a client needs no JSON5 parser.
+`parse_error` is set when a stored file cannot be read — which is **not** the same as a file with
+no overrides, and used to be indistinguishable from it.
+
+### PUT /api/v1/strategies/{id}/params — body `{ "params_json5": "<json5>" }` → `{ "warnings": string[] }`
+
+**Refused (`400`)** when the file is not valid JSON5, an entry has no `symbol`, or a config names
+a `tf` the platform cannot run. The column used to be opaque text that accepted anything, and the
+only reader was a browser `catch {}` that silently launched with zero overrides.
+
+**Warned (still saved)** for keys that are not inputs of the strategy, and for several configs
+sharing one `(symbol, tf)` — the latter is legitimate (ranked sweep leaderboards) and is reported
+only so you know to use the config selector.
+
+### POST /api/v1/strategies/{id}/params/validate — body `{ "params_json5" }`
+→ `{ "ok": bool, "errors": string[], "warnings": string[] }`. Same checks, without writing.
+
+### POST /api/v1/strategies/{id}/params/resolve
+Body `{ "symbol", "timeframe", "config_index"?, "params_json5"? }` →
+```
+config_index     int|null    index into the symbol's configs, null when nothing matched
+candidate_count  int         how many configs exist at this (symbol, timeframe)
+candidates       array       { index, tf, label, summary } — for a config picker
+tf, htf, ltf     string|null the chosen config's timeframes
+label            string|null the config's own `label`, if it has one
+params_override  object      pass straight to a launch endpoint
+miss             object|null why nothing matched: no_file | no_symbol | no_timeframe
+```
+
+**The one place `(symbol, timeframe) -> overrides` is decided.** Symbol and timeframe are matched
+**canonically**: `XOM` matches `NYSE:XOM` (though `NYSE:XOM` and `NASDAQ:XOM` stay distinct), and
+`1H` / `1h` / `60` / `60m` are one timeframe. Exact string equality missed all of those and fell
+through to the strategy's own defaults without a word.
+
+An **empty `timeframe`** returns every config the symbol has, for a picker that lists them all and
+takes the execution timeframe from the selection.
+
+Selection among same-timeframe configs is **by index, and the list is ordered** — several real
+files are ranked sweep leaderboards where index 0 is the winner. Resolving by "first match on tf"
+makes candidates #2..#N unreachable, which is exactly how the launch screens once disagreed with
+each other about the same file.
+
+`params_json5` in the body resolves against supplied content instead of the stored column, for
+GitHub-backed strategies whose file lives in the user's own repo.
 
 Write-protected with the code, and for the same reason: the params travel with the `.pine` and a
 live bot froze both at launch. Returns `400` with the `locked` reason when the strategy is live or
@@ -241,14 +286,17 @@ yesterday to trade tomorrow is the workflow, not lookahead.
 
 ## Jobs
 
-All launch endpoints return **`201`** with a `JobResponse`. Poll `GET /api/v1/jobs/{id}` for `status`.
+All launch endpoints return **`201`** with a `JobResponse` when the job starts immediately, or
+**`202`** with `status: "queued"` when no runner has room for it right now. Poll
+`GET /api/v1/jobs/{id}` for `status` either way — a queued job needs no further action, the
+scheduler starts it when capacity frees up.
 
 **JobResponse**
 ```
 id             uuid
 strategy_id    uuid | null
 job_type       "backtest" | "sweep" | "robustness" | "stress" | "live"
-status         "pending" | "running" | "completed" | "failed" | "cancelled" | "timeout"
+status         "queued" | "pending" | "running" | "completed" | "failed" | "cancelled" | "timeout"
 container_id   string | null
 config         object            (serialized JobConfig; varies by job_type)
 auto_restart   bool              (live only; else false)
@@ -258,6 +306,9 @@ progress_done  int | null        (sweep/robustness)
 progress_total int | null
 error_message  string | null
 data_split_adjusted  bool | null  (provenance of the bars this job ran on — see below)
+queue_position   int | null    (queued only; 1-based, among YOUR OWN queued jobs)
+queue_reason     string | null (queued only; why it is waiting, in one sentence)
+queue_eta_secs   int | null    (queued only; rough seconds until it starts, or absent)
 ```
 
 **`data_split_adjusted` is provenance, and `null` is not `false`.** `true` = the bars were
@@ -268,7 +319,74 @@ setting overwrites the Parquet in place — two runs of the *same* backtest can 
 disagree, and this field is the only record of which series each one saw. When comparing results
 across jobs, compare this first. Never render `null` as "raw".
 
-Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `pending`, `running`.
+Terminal: `completed`, `failed`, `cancelled`, `timeout`. Non-terminal: `queued`, `pending`,
+`running`.
+
+**`queued` means accepted and waiting for capacity** — no container exists and nothing is being
+spent. It is not an error and needs no retry: the job starts on its own. `pending` is the
+sub-second gap between the row being written and the container starting.
+
+A job is queued when either the fleet has no room for it or your plan's concurrent-job limit is
+already reached. Each plan also has a QUEUE DEPTH, separate from its concurrent limit; a launch
+that would exceed both is refused `400` rather than queued. `queue_reason` says which of the
+three situations applies, and they call for different responses — wait, wait, or ask an
+administrator for capacity.
+
+### GET /api/v1/jobs/{id}/wait — block until the job is done
+
+`GET /api/v1/jobs/{id}` that blocks. **Same response shape**, so a caller that already parses the
+job endpoint needs no new parsing. Returns within milliseconds of the job reaching a terminal
+status.
+
+```
+timeout   int     optional  seconds to block; default 60, max 300
+on        string  optional  "finish" (default) | "start"
+```
+
+**If the returned `status` is still non-terminal, the wait timed out — call it again.** There is
+no separate flag; the status is the answer. A forty-minute sweep is about eight calls at
+`timeout=300`, each carrying a real result, rather than several hundred polls that say "still
+running".
+
+`on=start` returns as soon as the job leaves the queue and is on a runner. It exists because a
+queue makes "has my work begun" and "is my result ready" two different questions with different
+answers for minutes at a time. A job that fails or is cancelled while queued also satisfies a
+`start` wait — it will never start, so blocking on it would be waiting for something that cannot
+happen.
+
+At most **32** concurrent waits per account; use the bulk form below to watch more than that on
+one connection.
+
+### POST /api/v1/jobs/wait — watch several jobs on ONE connection
+
+```
+ids      uuid[]  required  up to 100
+mode     string  optional  "any" (default) | "all"
+timeout  int     optional  seconds; default 60, max 300
+on       string  optional  "finish" (default) | "start"
+```
+
+Returns an array of the SAME job objects, one per requested id, in the order given — every
+requested job's current state, so one response is a complete picture rather than a notification
+you then have to follow up on. `any` returns as soon as one job satisfies the wait; `all` waits
+for every one.
+
+Use this for a fan-out (a multi-symbol scan, a set of robustness runs). N parallel single-job
+waits is the same waste as polling in a different form. An id you do not own is a `404` for the
+whole call, not a silently shorter array.
+
+**`DELETE /api/v1/jobs/{id}` on a queued job cancels it outright.** There is no container to
+stop, so this is free and immediate.
+
+**Live bots are never queued.** A bot that starts twenty minutes late has missed twenty minutes
+of the market on a decision nobody made, so `POST /api/v1/jobs/live` still refuses with `400`
+when the concurrent limit is reached rather than waiting.
+
+**Scheduling is by MEMORY, not by job count.** A portfolio book reserves 6 GB and a single
+backtest 512 MB, so a runner with four jobs on it may have room for a fifth backtest and none
+for a book. That is why a large job can sit queued while smaller ones launched after it start
+immediately — though only for a few minutes: a job that has waited long enough has capacity held
+for it rather than being overtaken indefinitely.
 
 ### Fields common to backtest / sweep / robustness / stress
 ```
@@ -322,7 +440,7 @@ robustness and stress.
 ### POST /api/v1/jobs/backtest
 Above fields, plus:
 ```
-params_override  object  optional   { var_name: number|bool }  (strings rejected)
+params_override  object  optional   { var_name: number|bool|string }
 ```
 
 ### POST /api/v1/jobs/portfolio-backtest — **Pro plan or higher**
@@ -342,7 +460,7 @@ initial_capital  number  optional  (shared book account size; default 100000)
 leverage         number  optional  (gross-exposure cap ×equity: Σ|leg notional| ≤ leverage×equity;
                                     default 2.0 = full long + full short. 1.0 caps total exposure
                                     at the account size)
-params_override  object  optional  ({ var_name: number|bool }, as /backtest)
+params_override  object  optional  ({ var_name: number|bool|string }, as /backtest)
 ```
 **400 if the strategy's `request.security` universe resolves to fewer than 2 tradable legs.** The
 results add a `legs[]` array (per-symbol trade count and net P&L contribution) on top of the usual
@@ -384,6 +502,25 @@ A 1-axis grid is valid — the cartesian product of a single axis is that axis.
 **400 if the strategy has no `//@sweep` parameters.** There is no search space, so grid degenerates
 to the single authored point and rbf exits non-zero in the container. Mark an input by putting
 `//@sweep` on the line above its `input.int` / `input.float` call.
+
+**`//@sweep` is a MARKER and takes no arguments — the range comes from the input's own
+`minval` / `maxval` / `step`.** The shape invites the opposite guess, and the wrong form parses
+without complaint and does nothing:
+
+```pine
+//@sweep
+window = input.int(21, "Fit window", minval = 15, maxval = 60, step = 15)   // → 4 values
+```
+
+Writing a range after the marker (`//@sweep <lo>..<hi> step <n>`) parses without complaint and is
+discarded; the same input left at `minval = 8, maxval = 500` is 493 values, not 4.
+
+So on a swept input those three arguments **are** the search space and must be chosen for the
+search, not for what the form should accept. An input missing `minval`/`maxval` covers its entire
+range: the launch is refused with `Grid would require N combinations (limit 100000)` rather than
+run, which is loud but costs a round trip. Multiply the axes out before launching. And do not mark
+an input the script cannot reach on its current path (a gate that selects one branch makes the
+other branch's thresholds inert) — every trial such an axis adds is an exact duplicate of another.
 
 **`metric` only aims `rbf` and `monte_carlo`.** Grid enumerates every cell and random samples
 blindly: both evaluate a predetermined set of points no matter what the objective is, and you rank
@@ -860,6 +997,9 @@ saxo_env            string  optional  ("sim"|"live"; Saxo only)
 webhook_url         string  optional  (http/https; receives order/trade/fill events; PRO)
 options_routing     bool    optional  (default false; ALPACA ONLY — see below)
 options_params      object  optional  (per-bot options knobs; ignored unless options_routing)
+futures_auto_roll   bool    optional  (default true; FUTURES ONLY — roll the position into the
+                                       next delivery month instead of holding a contract that
+                                       stops trading. See below)
 ```
 
 `broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
@@ -945,13 +1085,50 @@ every venue; the order model underneath is not, and the difference is not guessa
 
 | Broker | Instruments | Stop-loss / take-profit |
 |---|---|---|
-| **Saxo** | EU + US equities | Native **OCO** at the broker: a resting stop *and* a resting TP, linked (a fill on one cancels the other). `saxo_env` picks sim (paper) or live. |
+| **Saxo** | EU + US equities, and **futures** (Eurex / Euronext, `ContractFutures`) | Native **OCO** at the broker: a resting stop *and* a resting TP, linked (a fill on one cancels the other). `saxo_env` picks sim (paper) or live. On a futures symbol the bot resolves the product root to the live delivery month at launch and re-checks it hourly — see *Futures and expiry* below. |
 | **Alpaca** (equity) | US equities | Native **OCO**, same as Saxo. Margin accounts can short. |
 | **Alpaca** (crypto) | US-dollar pairs only (`BTCUSD`, `ETHUSD`, …; a symbol is tradeable here iff its `alpaca_us_symbol` is non-null) | Only **one** exit can rest, and it is the **stop** — crypto refuses `oco`/`bracket`, and the first resting exit reserves the whole coin balance. The take-profit is therefore **bot-managed**: evaluated at bar close, and on a hit the bot cancels the stop and market-closes. Fractional size; fees are taken in the coin. |
 | **Bitstamp** (spot) | USD + EUR spot pairs (iff `bitstamp_pair` is non-null) | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
-| **PropFirm** | CME futures, through the firm's gateway (Tradovate) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot trades the **front month resolved at launch and does not roll** — stop and relaunch before expiry. The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. |
+| **PropFirm** | CME futures, through the firm's gateway (Tradovate) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. |
+
+#### Futures and expiry (`futures_auto_roll`)
+
+A futures contract stops trading on its expiry date. Every other instrument on the platform is
+permanent, so this is the one launch where the thing you are trading has an end.
+
+Two venues trade futures: `propfirm` (CME, through the firm's gateway) and `saxo` (Eurex and
+Euronext). Any other broker refuses a futures symbol with
+`400 "... is tradable only through a prop-firm account or Saxo"`, and both futures venues refuse a
+cash symbol — the guard runs both ways.
+
+The platform stores a product **root** (`ES`, `FDX`), never a delivery month, and the bot asks the
+venue at launch which contract is front. Nothing here holds an expiring id, so nothing can silently
+point at a dead instrument. From then on:
+
+- **The bot re-checks hourly** and warns in the job log from **7 days out**, again on the day, and
+  again if it is ever pointed at something already expired.
+- **`futures_auto_roll: true` (the default) rolls the position.** When the venue names a new front
+  month, the bot cancels what it has resting, closes at the market in the expiring contract, moves
+  to the new one, and re-opens the same side and size. Both legs land in your trade history as
+  `FUTURES_ROLL_CLOSE` and `FUTURES_ROLL_OPEN`.
+- **`false` warns and holds.** Not the safer option, just a different risk: the bot keeps a
+  contract that will stop trading, and you have to close it and relaunch yourself.
+
+Two things to know before leaving the default on, because neither is visible in a backtest:
+
+1. **A roll is two real market orders.** You pay the spread twice and inherit the price difference
+   between the two months. A backtest models none of it — the batch engines run on a stitched
+   continuous series where the roll is a step in the data, not a pair of fills.
+2. **Levels the strategy remembers do not move with it.** The cost basis is re-read from the broker
+   after the roll, so `strategy.position_avg_price` is correct — but a trailing stop or a breakeven
+   mark held in a Pine `var` was computed against the old contract's prices. The bot prints a
+   warning naming this at the moment it rolls; check the first exit order it places afterwards.
+
+If any leg cannot be closed, the roll is **abandoned** rather than half-done: the bot stays in the
+expiring contract, says so, and retries at the next check. Switching contracts while still holding
+the old one would leave a position the bot can no longer address.
 
 Bitstamp has **no `env` field on the launch request** — the environment (`sandbox` = the venue's
 only paper mode, or `live` = real money) is fixed when the credentials are saved. Check it with
@@ -1086,6 +1263,17 @@ Response: `{ "analysis": "<markdown>", "model": "<model id>" }`.
 ### POST /api/v1/jobs/compare/analyse — AI (descriptive) analysis comparing several jobs
 Request: `{ "ids": [uuid, …], "provider": string|null }` — **2 to 6** ids, each completed and
 yours (`400 "Expected 2–6 job IDs"` otherwise). Same response shape as `/analyse`.
+**A string override is applied only when the input declares an `options` list and the value is a
+member of it.** That is what makes it safe to splice into Pine source: the emitted text comes from
+a fixed set already in the script, so nothing user-supplied reaches the engine. A string input
+without `options` stays un-overridable.
+
+**An override that does not land is reported, never silent.** A key naming no input, a string
+outside its `options`, or any other unrepresentable value leaves the strategy's own default in
+place and returns a warning from `patch-preview`. Previously all of these were skipped without a
+word, so the job ran on the authored defaults and reported success — and since the defaults are
+always a complete, plausible configuration, nothing in the result looked wrong.
+
 ### POST /api/v1/jobs/patch-preview — preview a strategy's inputs after overrides, without running
 Request: `{ "strategy_id": uuid, "params_override": {…}|null }`. Returns
 `{ "code": "<pine source with the defaults rewritten>" }` — the cheap way to check a
@@ -1108,20 +1296,100 @@ A source can only serve a symbol it has a ticker for — the per-symbol tickers 
 | `massive` | US equities (a 10-year window on our plan) | Also the source behind Pine's `request.financial` fundamentals and the corporate-action series; Yahoo is merged in as a second fundamentals source per series. Server-side rate-limited, so a long intraday range is paced across many paged calls — a fetch can take minutes without anything being wrong. Vendor rejections are surfaced verbatim rather than as a generic failure. |
 | `ibkr` | Equities | Needs IBKR configured (TWS/Gateway). |
 | `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
+| `wikipedia` | Attention, anything with an article | **Non-price.** Daily pageviews from 2015-07-01. No account needed. `1D` only. |
+| `reddit` | Attention, US retail names | **Non-price.** Daily post counts across r/wallstreetbets, r/stocks and r/investing, from 2005. `1D` only. |
+| `secform4` | Insider dealing, **US-registered issuers only** | **Non-price.** SEC Form 4 open-market purchases and sales in dollars, from 2003. A foreign private issuer files a 20-F and is exempt from Section 16, so it never files one at any date. `1D` only. |
+| `google` | Attention, any search term | **Non-price, and NOT REPRODUCIBLE** — see the warning below. Daily search interest. `1D` only. |
 
 **Use `bitstamp` for deep intraday crypto history.** It is the only source that reaches it:
 Yahoo cuts intraday off at 730 days and Alpaca's crypto data begins in 2021, while Bitstamp's
 public series goes back to **2011** and quotes real BTC/USD (not USDT). A multi-year hourly
 Bitcoin backtest — the window the MCPT literature uses — is only reproducible from this source.
 
+### Non-price series (attention and disclosure)
+
+Four sources carry something other than a price. They are ordinary catalog datasets — fetched the
+same way, cached the same way, read with `request.security` — but they live on their **own symbols**,
+prefixed by the publisher:
+
+```pine
+views = request.security("WIKI:ASML",     "1D", pageviews)
+posts = request.security("REDDIT:GME",    "1D", mentionCount)
+flow  = request.security("SECFORM4:MSFT", "1D", insiderFlowUsd)
+si    = request.security("GOOGLE:NVDA",   "1D", searchInterest)
+```
+
+The prefix names **who published the number**, never what it measures. A single `ATTENTION:`
+namespace could not say whether a value came from Wikipedia or Google, and those are not
+interchangeable measurements: research comparing search-based and Wikipedia-based attention finds
+they carry different information and diverge most in stressed markets.
+
+**Every dataset is stored as five columns, because that is what a bar is.** A non-price series has
+no prices to put in them, so each column carries a different figure under a name that says what it
+holds. **Do not write `open` or `close` on these symbols.**
+
+| Column | `WIKI:` | `REDDIT:` | `SECFORM4:` | `GOOGLE:` |
+|---|---|---|---|---|
+| 1 | `pageviews` | `mentionCount` | `insiderFlowUsd` | `searchInterest` |
+| 2 | `mobileViews` | `mentionScore` | `transactionShares` | `searchInterestRaw` |
+| 3 | `desktopViews` | `mentionComments` | `transactionPricePerShare` | *(none)* |
+| 4 | `spiderViews` | `topAuthorPosts` | `insiderSharesHeld` | *(none)* |
+| 5 | `pageEdits` | `distinctAuthors` | `transactionCount` | `windowsCovering` |
+
+`GOOGLE:` has three names rather than five because the source provides one number per day. The two
+unused columns are deliberately **not addressable** — a strategy can name what exists and cannot
+name what does not.
+
+**Reddit's author fields are the reason to use that series.** A post count cannot separate
+coordinated posting from genuine interest. Counting who posted can:
+
+```pine
+posts   = request.security("REDDIT:GME", "1D", mentionCount)
+authors = request.security("REDDIT:GME", "1D", distinctAuthors)
+topper  = request.security("REDDIT:GME", "1D", topAuthorPosts)
+
+breadth       = authors / posts    // 1.0 = everyone posted once
+concentration = topper  / posts    // high = one account is doing the talking
+```
+
+**`insiderFlowUsd` is cumulative.** It only moves on filing days and never resets, so the
+information is in the difference between two points, not the level: `flow - flow[90]` is the net
+dollars filed over the window. Only open-market transactions are counted (Form 4 codes `P` and `S`);
+grants, option exercises and shares withheld to pay tax on a vesting are compensation mechanics, not
+decisions, and counting them is what produces the "insiders are dumping" headline every time a grant
+vests.
+
+**All four are publication-shifted by one day.** A day's figure is complete only once the day is
+over, so a bar is dated the session its number could first be acted on. You do not need `[1]`.
+
+> **`GOOGLE:` is not reproducible, and that is a property of the source.** Google scales every
+> response 0-100 against the maximum in the *requested window* and serves a sample, so an identical
+> request later returns slightly different history — worst on low-volume queries, and a ticker is a
+> low-volume query. Daily resolution is also only available for windows of eight months or less, so
+> a long history is stitched from overlapping windows rescaled onto each other, and values are no
+> longer capped at 100. Every other dataset on the platform returns the same numbers when
+> re-fetched; this one does not. Treat a result built on it as one draw rather than a measurement.
+
+> A prefixed symbol never falls back to the bare ticker, and a field name is checked against the
+> symbol it is read from. `WIKI:ABN` where no such symbol exists is an error rather than a quiet
+> substitution of ABN's price series, and `pageviews` read from a price symbol is refused rather
+> than silently returning that stock's close. Both would otherwise run, report plausible numbers,
+> and measure the wrong quantity.
+
 ### GET /api/v1/data/symbols → array
 ```
 id, tv_symbol, tv_full_symbol, display_name, index_name,
 yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null,
 saxo_uic|null, bitstamp_pair|null,
+wikipedia_article|null, reddit_query|null, sec_cik|null, google_trends_query|null,
 live_tradable  bool,
 strategy_profile  string|null
 ```
+
+The last four gate the non-price sources exactly as the broker tickers gate the price ones: a
+`null` means that source is not offered for the symbol. None is derivable from the ticker, which
+is why each is stored rather than inferred — `GME` is `GameStop` on Wikipedia, Microsoft's CIK is
+`0000789019`, and `NVDA` and `NVDA stock` are materially different Google Trends series.
 
 `strategy_profile` is a **snapshot** keyed by `"<source>:<timeframe>"`, computed once when a
 dataset is downloaded. It goes stale the moment that dataset is extended. For a reading that
