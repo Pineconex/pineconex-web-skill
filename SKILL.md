@@ -326,6 +326,21 @@ Two related things worth telling users:
   there, because no search touched those bars.
 * **`perm_seed` on `/jobs/sweep`** runs a sweep against a permuted copy of the series, so a client
   can build the same null itself by re-submitting one sweep under N seeds.
+* **`perm_penalty` on `/jobs/sweep`** asks the same question *inside* the search instead of after
+  it. Set it to `k` and every trial is also run on `k` permuted copies of the market and ranked on
+  `objective - mean(null)`, so a setting has to beat noise to win at all. Prefer it when the user
+  asks "is this edge real" or "is it better than just holding the thing": a permuted market keeps
+  the instrument's drift and volatility and destroys only the ORDER of its bars, so whatever a
+  strategy earns by simply holding a rising market it earns there too. The winner's `objective` and
+  `perm_null` are both on the trial, and the edge is the difference — **report it**, because a
+  setting that scores 30 against a null of 1.6 and one that scores 30 against a null of 29 look
+  identical in every other column. It costs `(k+1)x` the sweep, cannot be combined with
+  `perm_seed`, and 3 to 10 is the useful range.
+
+**Do not present a sweep winner as validated because `perm_penalty` was on.** It changes which
+setting is returned; it does not produce a p-value, and the search still ran in-sample. The
+significance test is still the thing that answers "could this have happened by luck", and a winner
+that beat its own null by a wide margin is a better candidate for one, not a substitute.
 
 ## Core workflow: live bot
 
