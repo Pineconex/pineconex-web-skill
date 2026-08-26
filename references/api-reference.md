@@ -495,6 +495,12 @@ perm_seed   int    optional  (sweep a bar-PERMUTED copy of the series instead of
                               real bars — see below)
 perm_block  int    optional  (default 1; 1..1000. Permutation block size in bars.
                               Ignored unless perm_seed is set)
+perm_penalty
+            int    optional  (default 0 = off; 0..50. Score every trial against k permuted
+                              copies of the market and rank it on `objective - mean(null)`
+                              instead of on the objective. Applies to EVERY mode. Costs
+                              (k+1)x the sweep. Cannot be combined with perm_seed —
+                              see below)
 ```
 Which `input.*` vars are swept comes from the strategy (`GET .../inputs`, `swept: true`).
 A 1-axis grid is valid — the cartesian product of a single axis is that axis.
@@ -578,9 +584,12 @@ annealing mode lost to random consistently, and these two do not.
 
 **Custom objective: `"metric": "expr: <formula>"`.** An arithmetic expression over the trial
 metrics, e.g. `"expr: net_pnl_pct - 0.5 * max_dd_pct + 0.1 * trades"`. Variables: `net_pnl_pct`,
-`max_dd_pct`, `trades`, `win_rate`, `profit_factor`, `expectancy`, `sharpe`, `return_over_dd`,
-`bars_in_trade`, `time_in_market_pct`, `effective_exposure_pct` (aliases: `pnl`, `dd`/`max_dd`,
-`n_trades`, `winrate`, `pf`, `romad`, `bars_held`, `time_in_market`, `exposure`). Operators:
+`max_dd_pct`, `ulcer`, `sortino`, `cvar`, `trades`, `win_rate`, `profit_factor`, `expectancy`,
+`sharpe`, `return_over_dd`, `cagr`, `bars_in_trade`, `time_in_market_pct`,
+`effective_exposure_pct`, and on a basket `leg_win_frac`, `leg_sd`, `leg_mean`, `leg_min`,
+`leg_silent` (aliases: `pnl`, `dd`/`max_dd`, `ulcer_index`, `cvar_pct`/`expected_shortfall`,
+`n_trades`, `winrate`, `pf`, `romad`/`return_dd`, `cagr_pct`, `bars_held`, `time_in_market`,
+`exposure`, `leg_wins`, `leg_spread`, `worst_leg`). Operators:
 `+ - * / ( )` and
 numeric literals. The search MAXIMISES the expression as written — a penalty term gets a minus
 sign, and `max_dd_pct` is a positive percentage (a 12% drawdown is `12`), so subtract it to punish
@@ -588,7 +597,25 @@ risk. A malformed expression is rejected 400 with the parser's error. The `min_t
 applies to custom objectives too, and a division by zero disqualifies the trial rather than
 winning by infinity.
 
-**Pricing holding time.** The last three variables are the handles for "this edge is not worth the
+**Three exposure-aware objectives worth naming, because the sign is easy to get backwards.** The
+search MAXIMISES whatever it is given, so an objective you want minimised must be negated:
+
+```
+"expr: cagr / time_in_market_pct"   return per unit of time at risk — 12%/yr while invested a
+                                    third of the time beats 15%/yr always invested. Raise
+                                    min_trades with it: a setting that is in the market almost
+                                    never can divide its way to a huge score
+"expr: -time_in_market_pct"         MINIMISE exposure. Unnegated this searches for the setting
+                                    that is invested MOST, which is the opposite of the intent
+"expr: cagr"                        annualised growth. Unlike net_pnl_pct it is comparable
+                                    across runs of different lengths
+```
+
+`cagr` is `NaN` when the run has no known span or the account was wiped, and a non-finite objective
+disqualifies the trial rather than scoring it. On a PORTFOLIO sweep `time_in_market_pct` saturates
+at its 100 clamp once legs overlap — prefer `bars_in_trade` there.
+
+**Pricing holding time.** `bars_in_trade`, `time_in_market_pct` and `effective_exposure_pct` are the handles for "this edge is not worth the
 time it takes". Total bars held is `bars_in_trade * trades`, so a per-bar holding cost is one term:
 `"expr: net_pnl_pct - 0.02 * bars_in_trade * trades"`. This is how a per-step penalty from a
 reinforcement-learning reward is carried over — a sweep scores a finished backtest rather than a
@@ -648,7 +675,44 @@ an `expr:` on the per-metric quantiles gives a number matching no actual resampl
 backwards the moment terms are mixed (a bad world has low `net_pnl_pct` *and* deep `max_dd_pct`, so
 the two want opposite tails).
 
-It is a flag with nothing to configure, deliberately: the resample count converges, the quantile is
+**`perm_penalty` is the FOURTH axis, and the only one that changes what the search CLIMBS.** The
+other three leave the objective alone — `stability` perturbs the parameters, `bootstrap` perturbs
+the trades, `perm_seed` replaces the market — so a search still maximises raw in-sample performance
+and still returns whichever setting fitted the noise best; they measure that setting afterwards.
+This one subtracts each trial's own permuted null, so a setting has to beat noise to win at all.
+
+Set it to `k` and every trial is run once on the real bars and once on each of `k` permuted copies
+of the same market, then ranked on `objective - mean(null)`. A permuted market keeps the
+instrument's returns and destroys only their ORDER — same start price, same end price, same drift,
+same volatility — so the null is what this rule earns from the instrument when the ordering carries
+no information. Whatever a strategy makes by simply holding a rising market, it makes there too and
+gains nothing here. What survives the subtraction is timing.
+
+The `k` nulls are built once and shared by every trial. Drawing fresh permutations per trial would
+add an independent noise term to each one, and a search maximising `score - noise` finds the trial
+with the luckiest nulls rather than the best rule.
+
+**It cannot be combined with `perm_seed`** — that one replaces the whole search's market, so the
+observed side would be noise and the objective a difference of two null draws whose argmax is
+whichever cell drew the luckiest. The request is refused with 400 rather than one of them silently
+winning. It also refuses an `intrabar_timeframe`, for the same reason `perm_seed` does: sub-bar
+structure cannot be synthesized from permuted bars.
+
+Cost is exactly `(k + 1)x` the sweep, which is why it is off by default and capped at 50. Every
+trial that produced a usable null carries `perm_null`, and every trial the `min_trades` floor did
+not reject carries `objective` — the value of THIS run's metric, so the edge is
+`objective - perm_null`. Read `objective` rather than recomputing it: a client showing one metric
+while the search ranked by another gets a confident wrong answer, and a custom `expr:` cannot be
+evaluated outside the engine at all.
+
+```json
+{ "params": { "len": 20 }, "net_pnl_pct": 41.2, "objective": 3.07, "perm_null": 0.42 }
+```
+
+`perm_null` is absent when no null could be scored; `objective` is absent on a trial below
+`min_trades`, whose score is a sentinel rather than a measurement.
+
+`bootstrap` is a flag with nothing to configure, deliberately: the resample count converges, the quantile is
 fixed at the 25th percentile, and the block length is derived per trial from the trade sequence's
 own lag-1 autocorrelation. Any of them exposed would be a dial to turn until the strategy looked
 good. Blocks rather than single trades because consecutive trades are not independent — a trending
