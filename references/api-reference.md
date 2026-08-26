@@ -394,9 +394,9 @@ strategy_id           uuid    required
 symbol                string  required   (e.g. "AAPL")
 timeframe             string  required   ("1m","5m","15m","30m","60m","90m","1D","1W","1M"; case-sensitive: 1M=monthly, 1m=1min; 1H/1h alias→60m; other→400)
 from_date, to_date    date    required   (TRADE GATE, not a data slice — see below)
-data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca","bitstamp"
-                                          — see Data sources below; not every source carries
-                                          every symbol)
+data_source           string  required   ("yahoo","saxo","massive","ibkr","alpaca","bitstamp",
+                                          "binance" — see Data sources below; not every source
+                                          carries every symbol)
 htf_timeframe         string  optional   (higher timeframe for request.security; PREMIUM)
 htf_data_source       string  optional
 intrabar_timeframe    string  optional   (request.security_lower_tf)
@@ -1056,7 +1056,7 @@ heartbeat_secs      int     optional
 auto_restart        bool    optional  (default false)
 params_override     object  optional  { var_name: number|bool }
 broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp"
-                                       |"propfirm")
+                                       |"binance"|"propfirm")
 saxo_env            string  optional  ("sim"|"live"; Saxo only)
 webhook_url         string  optional  (http/https; receives order/trade/fill events; PRO)
 options_routing     bool    optional  (default false; ALPACA ONLY — see below)
@@ -1067,7 +1067,11 @@ futures_auto_roll   bool    optional  (default true; FUTURES ONLY — roll the p
 ```
 
 `broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
-`400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp, propfirm`.
+`400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp, binance,
+propfirm`.
+
+**`binance` trades SPOT only, and its bot has no `90m`.** The live timeframe subset lists `90m`
+but the Binance venue has no such kline, so pick one of `5m 15m 30m 60m 1D` for a Binance bot.
 
 **Multi-symbol baskets (`symbols`) and portfolio mode are a paid-plan feature.** Two or more
 entries launch a single `LiveMulti` job: one container, one process, one broker account, one
@@ -1153,6 +1157,7 @@ every venue; the order model underneath is not, and the difference is not guessa
 | **Alpaca** (equity) | US equities | Native **OCO**, same as Saxo. Margin accounts can short. |
 | **Alpaca** (crypto) | US-dollar pairs only (`BTCUSD`, `ETHUSD`, …; a symbol is tradeable here iff its `alpaca_us_symbol` is non-null) | Only **one** exit can rest, and it is the **stop** — crypto refuses `oco`/`bracket`, and the first resting exit reserves the whole coin balance. The take-profit is therefore **bot-managed**: evaluated at bar close, and on a hit the bot cancels the stop and market-closes. Fractional size; fees are taken in the coin. |
 | **Bitstamp** (spot) | USD + EUR spot pairs (iff `bitstamp_pair` is non-null) | **No native stop or TP exists at all.** Spot accepts `stop_price` and answers `200 OK` with an order id, but creates nothing. **Every stop on a Bitstamp bot is synthetic** — checked by the bot at bar close, on a 24/7 market. Long-only (no shorting on spot). |
+| **Binance** (spot) | USDT spot pairs (iff `binance_pair` is non-null) | A **real** `STOP_LOSS_LIMIT` rests at the exchange, so unlike Bitstamp the position is protected between bars. Only **one** exit can rest (a resting sell reserves the base balance), so the stop takes the slot and the take-profit is **bot-managed** — Alpaca crypto's shape. A pair whose own `orderTypes` omit `STOP_LOSS_LIMIT` is demoted to the synthetic stop and the bot says so at startup. Long-only. Fees are taken in the coin, so exits are sized from the exchange's free balance rather than from the bot's book. |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
 | **PropFirm** | CME futures, through the firm's gateway (Tradovate) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. |
@@ -1203,6 +1208,17 @@ and Bitstamp stores no average entry price, so the bot reconstructs a cost basis
 history — and a coin that was *deposited* (or bought outside the API's 30-day transaction window)
 has no purchase price anywhere. Rather than invent one, the bot logs that it cannot price the
 holding and stays flat. Fund a Bitstamp bot's account by **buying** the coin, not depositing it.
+
+**Binance works the same way on both counts**, and for the same reasons: no `env` on the launch
+request (it is fixed with the credentials — `demo`, `testnet` or `live`, read it back from
+`GET /api/v1/binance/status`), and a holding it cannot price from your fill history is not adopted.
+Note `demo` and `testnet` are separate VENUES with separate keys, not paper modes on a live
+account, so "connected" on one says nothing about the others.
+
+**Binance is UNVERIFIED against the venue.** The connector, the launch arm and the bot's order
+paths are written and tested, and no order has ever been placed on any of the three environments.
+Run a Binance bot on `demo` or `testnet` and check the venue's own `openOrders` before trusting it
+with real money.
 
 **Every order a live bot places carries a client reference**, so a broker's own trade report can
 be attributed back to a specific bot rather than guessed at from a symbol and a time window —
@@ -1359,7 +1375,8 @@ A source can only serve a symbol it has a ticker for — the per-symbol tickers 
 | `alpaca` | US equities + US-dollar crypto pairs | Needs a connected Alpaca account. Crypto history **starts 2021-01-01**. |
 | `massive` | US equities (a 10-year window on our plan) | Also the source behind Pine's `request.financial` fundamentals and the corporate-action series; Yahoo is merged in as a second fundamentals source per series. Server-side rate-limited, so a long intraday range is paced across many paged calls — a fetch can take minutes without anything being wrong. Vendor rejections are surfaced verbatim rather than as a generic failure. |
 | `ibkr` | Equities | Needs IBKR configured (TWS/Gateway). |
-| `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
+| `bitstamp` | Crypto (USD + EUR pairs) + a few FX pairs, plus 20 perpetual futures | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 1D` only. |
+| `binance` | Crypto: USDT spot pairs + USD-M perpetual futures | **No account or key needed** — public endpoint. Timeframes `1m 5m 15m 30m 60m 240m 1D 1W 1M`, **no 90m**. Always reads the PRODUCTION venue even for an account connected to demo or testnet — a demo order book is not the market. Spot vs perpetual is a per-symbol fact (`BTCUSDT` is both), never inferred from the pair name. |
 | `wikipedia` | Attention, anything with an article | **Non-price.** Daily pageviews from 2015-07-01. No account needed. `1D` only. |
 | `reddit` | Attention, US retail names | **Non-price.** Daily post counts across r/wallstreetbets, r/stocks and r/investing, from 2005. `1D` only. |
 | `secform4` | Insider dealing, **US-registered issuers only** | **Non-price.** SEC Form 4 open-market purchases and sales in dollars, from 2003. A foreign private issuer files a 20-F and is exempt from Section 16, so it never files one at any date. `1D` only. |
@@ -1444,7 +1461,7 @@ over, so a bar is dated the session its number could first be acted on. You do n
 ```
 id, tv_symbol, tv_full_symbol, display_name, index_name,
 yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null,
-saxo_uic|null, bitstamp_pair|null,
+saxo_uic|null, bitstamp_pair|null, binance_pair|null,
 wikipedia_article|null, reddit_query|null, sec_cik|null, google_trends_query|null,
 live_tradable  bool,
 strategy_profile  string|null
@@ -1454,6 +1471,19 @@ The last four gate the non-price sources exactly as the broker tickers gate the 
 `null` means that source is not offered for the symbol. None is derivable from the ticker, which
 is why each is stored rather than inferred — `GME` is `GameStop` on Wikipedia, Microsoft's CIK is
 `0000789019`, and `NVDA` and `NVDA stock` are materially different Google Trends series.
+
+
+**`wikipedia_article` may hold a title CHAIN, `current|former`, summed per day** — `Amazon
+(company)|Amazon.com`. Pageviews are counted under the title the reader actually requested, so
+moving an article splits its history across two titles and each half looks like a complete series.
+Mapping only the current title stores a series with a step at the move (measured on ASML: 51
+views/day in 2025, 978 in 2026), and nothing catches it, because the data-quality scan's cliff
+check is off for non-price sources. Three traps come before that one, and all three store cleanly
+while measuring the wrong thing: a **redirect** has its own much smaller count (`ASML Holding` was
+10% of `ASML`), a **disambiguation page** is a real page with real traffic (`Amazon` serves 211/day
+against `Amazon (company)`'s 8,047), and an **ambiguous word** resolves to the concept (`Oracle` is
+the article about prophecy). The fetch reports a redirect or a disambiguation page as a
+data-quality finding; a page move is not auto-detected and has to be mapped by hand.
 
 `strategy_profile` is a **snapshot** keyed by `"<source>:<timeframe>"`, computed once when a
 dataset is downloaded. It goes stale the moment that dataset is extended. For a reading that
@@ -1470,10 +1500,27 @@ bars, so treating them as tradable would have opened a leveraged CFD position fr
 backtested on the unleveraged cash index.)
 Crypto lives under `index_name` **"Crypto (USD)"** / **"Crypto (EUR)"**; `tv_symbol` is the
 pairless form (`BTCUSD`, `ETHEUR`). The per-broker tickers differ and are **not**
-interchangeable — `BTC-USD` (Yahoo) vs `BTC/USD` (Alpaca) vs `btcusd` (Bitstamp) — but you
-never send those: address everything by `tv_symbol` and the API maps it per source and per
-broker. A symbol whose `alpaca_us_symbol` is null cannot be traded on Alpaca (most EUR pairs),
-and one whose `bitstamp_pair` is null cannot be traded on Bitstamp.
+interchangeable — `BTC-USD` (Yahoo) vs `BTC/USD` (Alpaca) vs `btcusd` (Bitstamp) vs `BTCUSDT`
+(Binance) — but you never send those: address everything by `tv_symbol` and the API maps it per
+source and per broker. A symbol whose `alpaca_us_symbol` is null cannot be traded on Alpaca (most
+EUR pairs), one whose `bitstamp_pair` is null cannot be traded on Bitstamp, and one whose
+`binance_pair` is null cannot be traded on Binance.
+
+**The Binance leg of a crypto row is quoted in USDT while the rest of the row is quoted in USD.**
+`BTCUSD` carries `yahoo_ticker`, `bitstamp_pair` and usually `alpaca_us_symbol` in real dollars,
+and `binance_pair = "BTCUSDT"`. That is a deliberate hand-checked mapping, not a naming quirk: the
+two track within a few basis points normally and diverge in a stablecoin depeg, which is when a
+crypto strategy is busiest. So a backtest on `BTCUSD` runs on USD bars while a Binance live bot
+fills in USDT. Sizing is unaffected — the bot reads the pair's quote asset and sizes against the
+account's real USDT balance. 15 majors are mapped (`BTCUSD ETHUSD SOLUSD XRPUSD BNBUSD ADAUSD
+DOGEUSD AVAXUSD LINKUSD DOTUSD LTCUSD BCHUSD ATOMUSD UNIUSD AAVEUSD`).
+
+**Perpetual futures are DATA ONLY.** `index_name` **"Perpetual Futures (Crypto)"** / **"(Macro)"**
+(Bitstamp, 20 rows) and **"Perpetual Futures (Binance)"** (10 rows) are fetchable and backtestable
+with `live_tradable = false`, so a live launch on one is refused. Pine's cash-equity model has no
+leverage, funding or liquidation, and the bot has no concept of a position the *venue* closed. The
+`.P` suffix on `tv_symbol` (`BTCUSDT.P`) is what separates a perpetual from the spot pair of the
+same name — they share nothing but the name.
 
 ### GET /api/v1/data/catalog → array of cached OHLCV datasets
 ```
@@ -1616,6 +1663,7 @@ that is persisted.
 | Broker | Connect over the API? | How |
 |---|---|---|
 | **Bitstamp** | yes | `POST /bitstamp/credentials` — API key + secret |
+| **Binance** | yes | `POST /binance/credentials` — API key + secret |
 | **Alpaca** | yes | `POST /alpaca/keys` — key id + secret (the OAuth flow is browser-only) |
 | **Lightspeed** | yes | `POST /lightspeed/credentials` |
 | **IBKR** | yes | `POST /ibkr/settings` — host/port of your own TWS or Gateway |
@@ -1678,6 +1726,35 @@ at connect rather than mid-trade.
 
 `GET /api/v1/bitstamp/status` → `{ connected, env, account }`, where `account` lists the funded
 currencies (Bitstamp has no account number). `DELETE /api/v1/bitstamp/disconnect` → `204`.
+
+### POST /api/v1/binance/credentials → `204`
+```
+api_key     string  required
+api_secret  string  required
+env         string  required  ("demo"    = Demo Trading, demo-api.binance.com — the default
+                               | "testnet" = Spot Testnet, testnet.binance.vision
+                               | "live"    = REAL MONEY, api.binance.com)
+```
+Both halves are secret, as on Bitstamp: the key is the identity (`X-MBX-APIKEY`), not a public id.
+Verified against `/api/v3/account` before storing.
+
+**`env` selects a VENUE, not a mode on one account, and a key only works at the one that minted
+it.** Demo keys come from the user's real Binance account via `demo.binance.com` and give demo
+execution against the **live tape**, which makes it the closest paper analogue of live trading on
+any broker here — hence the default. The Spot Testnet is a wholly separate account system with its
+own registration and its own thin book. A crossed key comes back **`-2015 Invalid API-key, IP, or
+permissions for action`**, which reads like a bad key and almost never is; the error we return
+names the host we tried so the mismatch is visible.
+
+Two keys are refused at connect rather than at the first order: one that **cannot trade**
+(`canTrade != true` — a read-only key authenticates perfectly and then rejects every order), and,
+on `live`, one that **can withdraw**. A trading bot never needs withdrawal, and the credential is
+held in plaintext on the runner that trades it: trading is a bounded loss, withdrawal is the whole
+balance. A key scoped away from `SPOT` is refused too — this is spot only, deliberately, since the
+leveraged products have no place in Pine's cash-equity model.
+
+`GET /api/v1/binance/status` → `{ connected, env, account }`, where `account` lists the funded
+assets (Binance has no account number). `DELETE /api/v1/binance/disconnect` → `204`.
 
 ### POST /api/v1/lightspeed/credentials → `204`
 ```
@@ -1786,8 +1863,8 @@ Changing `github_linked_repo` also moves the sync webhook: it is deleted from th
 registered on the new one.
 
 ### PUT /api/v1/auth/me/brokers — which broker cards the web UI shows → the stored array
-`{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `propfirm`, `ibkr`,
-`ibkr_web`, `lightspeed`; an unknown id is a `400`. The list is sorted and de-duplicated before
+`{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `binance`, `propfirm`,
+`ibkr`, `ibkr_web`, `lightspeed`; an unknown id is a `400`. The list is sorted and de-duplicated before
 storing, and `[]` shows every card again.
 
 **Cosmetic.** Hiding a broker does not disconnect it, does not revoke its credentials and does

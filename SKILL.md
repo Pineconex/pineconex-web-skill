@@ -346,10 +346,10 @@ that beat its own null by a wide margin is a better candidate for one, not a sub
 
 1. Confirm with the user (broker, symbol, paper vs. live).
 2. Ensure the broker is connected: `auth "$PINECONEX_API_URL/api/v1/alpaca/status"` (or `saxo`,
-   `ibkr`, `lightspeed`, `bitstamp`, `propfirm`). If not connected, the user must connect it in the
-   web UI (OAuth) — except **Bitstamp** and **prop-firm** accounts, which take credentials and can
-   be connected over the API (`POST /api/v1/bitstamp/credentials`,
-   `POST /api/v1/propfirm/credentials`).
+   `ibkr`, `lightspeed`, `bitstamp`, `binance`, `propfirm`). If not connected, the user must connect
+   it in the web UI (OAuth) — except **Bitstamp**, **Binance** and **prop-firm** accounts, which
+   take credentials and can be connected over the API (`POST /api/v1/bitstamp/credentials`,
+   `POST /api/v1/binance/credentials`, `POST /api/v1/propfirm/credentials`).
 3. Launch:
    ```bash
    auth -X POST "$PINECONEX_API_URL/api/v1/jobs/live" \
@@ -444,30 +444,49 @@ A strategy is **write-protected** while it is running live or held in the snapsh
 obstacle to route around — a bot runs the code it was launched with, so editing it could never have
 reached the running bot anyway. Stop the bot, or re-snapshot without it.
 
-## Crypto and Bitstamp
+## Crypto: Bitstamp, Alpaca and Binance
 
-Crypto is tradeable on **Bitstamp** (USD + EUR spot pairs) and **Alpaca** (US-dollar pairs only),
-and backtestable from `yahoo`, `alpaca`, or `bitstamp`. Symbols live under `index_name`
-`"Crypto (USD)"` / `"Crypto (EUR)"` and are addressed by `tv_symbol` (`BTCUSD`, `ETHEUR`) —
-the API maps that to each venue's own name, so never hand-build `BTC/USD` or `btcusd`.
+Crypto is tradeable on **Bitstamp** (USD + EUR spot pairs), **Alpaca** (US-dollar pairs only) and
+**Binance** (USDT spot pairs), and backtestable from `yahoo`, `alpaca`, `bitstamp` or `binance`.
+Symbols live under `index_name` `"Crypto (USD)"` / `"Crypto (EUR)"` and are addressed by
+`tv_symbol` (`BTCUSD`, `ETHEUR`) — the API maps that to each venue's own name, so never hand-build
+`BTC/USD`, `btcusd` or `BTCUSDT`.
 
-**Three things worth telling a user before they launch a crypto bot, because Pine hides them:**
+**Four things worth telling a user before they launch a crypto bot, because Pine hides them:**
 
 * **A Bitstamp stop-loss is not a broker order.** Bitstamp spot has *no* native stop, TP, or OCO
   — it accepts `stop_price`, answers `200 OK` with an order id, and creates **nothing**. So
   `strategy.exit`'s stop on Bitstamp is **synthetic**: the bot checks it at bar close, on a 24/7
   market. A gap through the stop while the bot is between bars is not protected against. Never
   tell a user their Bitstamp bot "has a stop at the broker" — it does not.
-* **Alpaca crypto rests one exit, and it is the stop.** Crypto refuses OCO, and the first resting
-  exit reserves the whole coin balance, so the take-profit is bot-managed (bar-close, then cancel
-  the stop and market-close). Alpaca *equity* gets a real broker-side OCO; the two behave
-  differently on the same broker.
-* **Bitstamp is spot: long-only.** A short entry is refused. And a bot will refuse to adopt coins
+* **Alpaca crypto and Binance rest one exit, and it is the stop.** The first resting exit reserves
+  the whole coin balance, so the take-profit is bot-managed (bar-close, then cancel the stop and
+  market-close). Alpaca *equity* gets a real broker-side OCO; the two behave differently on the
+  same broker. Binance's stop is a real `STOP_LOSS_LIMIT` resting at the exchange, so unlike
+  Bitstamp a Binance bot IS protected between bars.
+* **All three are spot: long-only.** A short entry is refused. And a bot will refuse to adopt coins
   it cannot price (deposited coins have no purchase price in the API) — fund by **buying**.
+* **A Binance pair is quoted in USDT while the rest of the symbol is quoted in USD.** `BTCUSD` maps
+  to `BTCUSDT` at Binance and to real dollars everywhere else, so a backtest runs on USD bars while
+  the live bot fills in USDT. They track within a few basis points until a stablecoin depeg, which
+  is exactly when a crypto strategy is busiest. Say so rather than treating them as one price.
+
+**Binance has three environments and they are separate VENUES**, not paper modes on one account:
+`demo` (keys from the user's real Binance account via demo.binance.com — demo execution against
+the live tape, and the default), `testnet` (its own registration, its own thin book) and `live`.
+A key only works at the one that minted it; a crossed key returns `-2015 Invalid API-key…`, which
+reads like a bad key and almost never is. **No Binance order has ever been placed from the
+platform** — the connector and bot are written and tested but unverified at the venue, so steer a
+user to `demo` first and to checking the venue's own `openOrders`.
 
 For historical data, prefer **`bitstamp`** for anything intraday and older than ~2 years: Yahoo
 refuses intraday beyond 730 days and Alpaca's crypto history starts in 2021, while Bitstamp's
-public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
+public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`). `binance` is public
+too (`1m 5m 15m 30m 60m 240m 1D 1W 1M`). Both also carry **perpetual futures** — 20 rows on
+Bitstamp, 10 on Binance, under `index_name` `"Perpetual Futures (…)"` with a `.P` suffix on
+`tv_symbol`. Those are `live_tradable = false`: data and backtests only, because Pine has no model
+of funding, leverage or liquidation. A `.P` row and the spot pair of the same name are different
+instruments.
 
 ## Endpoint catalog
 
@@ -480,7 +499,7 @@ public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`).
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` (price **and** the non-price attention/insider sources) |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
 | Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
-| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
+| Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,binance,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/binance/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
 | GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |
 | Account | `GET/PATCH/DELETE /api/v1/auth/me`, `POST /api/v1/auth/telegram/test`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
 

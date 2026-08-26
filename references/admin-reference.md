@@ -166,9 +166,9 @@ a `null` ticker means "this source cannot serve this symbol" and a job asking fo
 id, display_name, index_name, tv_symbol,
 saxo_uic (int|null), saxo_symbol, saxo_asset_type,
 yahoo_ticker, massive_ticker, ibkr_symbol, ibkr_exchange,
-alpaca_us_symbol, alpaca_eu_symbol, bitstamp_pair,
+alpaca_us_symbol, alpaca_eu_symbol, bitstamp_pair, binance_pair,
 mintick (float|null), currency, enabled (bool), live_tradable (bool),
-wikipedia_article, reddit_query, sec_cik, google_trends_query
+wikipedia_article, reddit_query, sec_cik, google_trends_query, unusualwhales_ticker
 ```
 
 ### POST /api/admin/symbols → `201` · PATCH /api/admin/symbols/{id} → `200`
@@ -179,11 +179,27 @@ Defaults on an absent field: `saxo_asset_type` → `"Stock"`, `enabled` → `tru
 `bitstamp_pair` is trimmed and **lowercased** (Bitstamp's OHLC path is case-sensitive: `btceur`
 works, `BTCEUR` 404s); an empty string becomes NULL.
 
-#### Five fields are the exception to full-replace
+`binance_pair` is the mirror image: trimmed and **UPPERCASED**, because Binance's signed endpoints
+reject a lowercase symbol. No separator is inserted — a Binance market is unseparated (`BTCUSDT`),
+and guessing one produces a symbol the venue does not have. An empty string becomes NULL, and it
+follows the full-replace rule (omitted on PATCH ⇒ cleared).
 
-`live_tradable` and the four non-price mappings do **not** follow the erase-if-absent rule above.
+**Do not derive `binance_pair` from `bitstamp_pair`.** Bitstamp quotes real BTC/USD and Binance's
+deep book is BTC/USDT; a stablecoin is not a dollar, so the two are hand-checked per venue. Setting
+it also makes the symbol **live-tradable on Binance**, not merely fetchable: a broker id is what
+`launch_live` hands to the bot (see `live_tradable`, migration 0106).
+
+`binance_market_type` (`spot` | `perp`) is **not settable over this API** — it is written by
+migration only. `BTCUSDT` is both a spot pair and a perpetual, sharing nothing but the name, so a
+new perpetual row needs a migration rather than a `POST`.
+
+#### Six fields are the exception to full-replace
+
+`live_tradable` and the five non-price mappings do **not** follow the erase-if-absent rule above.
 Omitting them leaves the stored value untouched. That is deliberate in both cases and for the same
 reason: a client that predates a field would otherwise wipe it while editing something unrelated.
+Note `binance_pair` is **not** among them — it is a broker/price mapping and follows full-replace,
+exactly as `bitstamp_pair` does.
 
 | Field | Omitted | `""` | Value |
 |---|---|---|---|
@@ -192,6 +208,7 @@ reason: a client that predates a field would otherwise wipe it while editing som
 | `reddit_query` | unchanged | clears | set (trimmed) |
 | `sec_cik` | unchanged | clears | set (trimmed) |
 | `google_trends_query` | unchanged | clears | set (trimmed) |
+| `unusualwhales_ticker` | unchanged | clears | set (trimmed) |
 
 **`live_tradable`** marks a row as *data-only*: a cash index has a price series but is not an
 instrument anyone can hold, so it backtests and sweeps while live launch refuses it with a `400`
@@ -209,6 +226,19 @@ symbol. None is derivable from the ticker, which is why each is stored rather th
 materially different Google Trends series. `sec_cik` is the **issuer's** Central Index Key, and a
 foreign private issuer has none — it files a 20-F and is exempt from Section 16 — so leave it null
 for every non-US listing rather than mapping a CIK that will never produce a filing.
+
+
+**`wikipedia_article` may hold a title CHAIN, `current|former`, summed per day** — `Amazon
+(company)|Amazon.com`. Pageviews are counted under the title the reader actually requested, so
+moving an article splits its history across two titles and each half looks like a complete series.
+Mapping only the current title stores a series with a step at the move (measured on ASML: 51
+views/day in 2025, 978 in 2026), and nothing catches it, because the data-quality scan's cliff
+check is off for non-price sources. Three traps come before that one, and all three store cleanly
+while measuring the wrong thing: a **redirect** has its own much smaller count (`ASML Holding` was
+10% of `ASML`), a **disambiguation page** is a real page with real traffic (`Amazon` serves 211/day
+against `Amazon (company)`'s 8,047), and an **ambiguous word** resolves to the concept (`Oracle` is
+the article about prophecy). The fetch reports a redirect or a disambiguation page as a
+data-quality finding; a page move is not auto-detected and has to be mapped by hand.
 
 ### DELETE /api/admin/symbols/{id} → `204` (`404` if unknown)
 

@@ -963,6 +963,52 @@ paths:
       responses:
         "204": { description: Disconnected. }
 
+  /api/v1/binance/status:
+    get:
+      operationId: binanceStatus
+      tags: [Brokers]
+      summary: Binance connection status.
+      description: >-
+        Returns { connected, env, account }. `env` is "demo", "testnet" or "live"; it is fixed at
+        connect time, not per bot launch. `account` lists the funded assets (Binance has no account
+        number). The three environments are separate VENUES with separate keys, so "connected" on
+        one says nothing about the others.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/binance/credentials:
+    post:
+      operationId: binanceConnect
+      tags: [Brokers]
+      summary: Connect a Binance SPOT account (API key + secret).
+      description: >-
+        Binance is connectable over the API, as Bitstamp and a prop-firm account are. Verified
+        against /api/v3/account before storing. Both key and secret are secret: the key is the
+        identity (X-MBX-APIKEY), not a public id. Three refusals happen at connect rather than at
+        the first order — a key that cannot trade (a read-only key authenticates cleanly and then
+        rejects every order), a key scoped away from SPOT (this is spot only), and on `live` a key
+        that can WITHDRAW (a trading bot never needs it, and the credential is held in plaintext on
+        the runner that trades it). NOTE no Binance order has ever been placed from the platform:
+        the connector and bot are written and tested but unverified at the venue.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BinanceCredentials" }
+      responses:
+        "204": { description: Connected. }
+        "400": { description: Binance rejected the credentials, or the key cannot trade / is not SPOT / can withdraw. A -2015 here almost always means the key was minted at a different one of the three environments. }
+  /api/v1/binance/disconnect:
+    delete:
+      operationId: binanceDisconnect
+      tags: [Brokers]
+      summary: Disconnect the Binance account.
+      responses:
+        "204": { description: Disconnected. }
+
   /api/v1/propfirm/firms:
     get:
       operationId: listPropFirms
@@ -1267,7 +1313,7 @@ components:
         data_source:
           type: string
           example: yahoo
-          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, wikipedia, reddit, secform4, google]
+          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google]
           description: >-
             A source only serves symbols it has a ticker for (see the Symbol schema); a null
             ticker is a 400. yahoo: equities + crypto, no account, but NO intraday older than
@@ -1275,6 +1321,11 @@ components:
             equities + US-dollar crypto pairs, crypto history starts 2021-01-01. bitstamp:
             crypto (USD + EUR) — no account needed, timeframes 1m/5m/15m/30m/60m/1D, and the
             ONLY source for deep intraday crypto history (public series back to 2011).
+            binance: USDT spot pairs + USD-M perpetual futures — no account needed, timeframes
+            1m/5m/15m/30m/60m/240m/1D/1W/1M (no 90m), and it always reads the PRODUCTION venue
+            even for an account connected to demo or testnet, because a demo book is not the
+            market. A .P symbol is a perpetual, a different instrument from the spot pair of the
+            same name, and is data-only (live_tradable false).
             NON-PRICE sources, 1D only, each on its own prefixed symbol (WIKI:, REDDIT:,
             SECFORM4:, GOOGLE:) and read in Pine by named field rather than open/close —
             wikipedia: pageviews from 2015. reddit: post and author counts from 2005.
@@ -1318,7 +1369,7 @@ components:
         timeframe: { type: string, example: "1D", description: "1D, 1W, 240m, 60m, 30m, 15m, 5m" }
         from_date: { type: string, format: date }
         to_date: { type: string, format: date }
-        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, wikipedia, reddit, secform4, google] }
+        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google] }
         initial_capital: { type: number, default: 100000, description: "Shared book account size. percent_of_equity sizing is a share of the whole book, not per symbol." }
         leverage: { type: number, default: 2.0, description: "Gross-exposure cap as a multiple of book equity (Sum|leg notional| <= leverage x equity). 2.0 = full long + full short (dollar-neutral); 1.0 caps total exposure at the account size." }
     PortfolioBacktestRequest:
@@ -1445,7 +1496,7 @@ components:
         params_override: { $ref: "#/components/schemas/ParamsOverride" }
         broker:
           type: string
-          enum: [saxo, alpaca, ibkr, lightspeed, bitstamp, propfirm]
+          enum: [saxo, alpaca, ibkr, lightspeed, bitstamp, binance, propfirm]
           default: saxo
           description: >-
             The broker changes what protective orders exist. saxo and alpaca (equity) place a
@@ -1453,13 +1504,18 @@ components:
             exit — the stop — so its take-profit is bot-managed at bar close. bitstamp is SPOT
             and has NO native stop/TP/OCO at all: it accepts stop_price, answers 200 OK with an
             order id, and creates nothing, so every Bitstamp stop is SYNTHETIC (bot-side, bar
-            close, on a 24/7 market) and spot is long-only. lightspeed and ibkr send market
+            close, on a 24/7 market) and spot is long-only. binance is SPOT too but rests a REAL
+            STOP_LOSS_LIMIT at the exchange, so the position IS protected between bars; like
+            alpaca crypto it rests only one exit, so its take-profit is bot-managed, and it is
+            long-only, USDT-quoted, and has no 90m kline. No Binance order has ever been placed
+            from the platform — treat it as unverified and start on its demo environment.
+            lightspeed and ibkr send market
             orders only — nothing rests, nothing protects. propfirm is CME futures through the
             firm's gateway: live-only (no data source, no backtest path), and the firm's own loss
             limit / trailing drawdown can flatten and lock the account invisibly to the bot. saxo
             also trades Eurex and Euronext futures; both futures venues resolve the product root
             to the live delivery month at launch and re-check it hourly (see futures_auto_roll).
-        saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's env is fixed when its credentials are saved." }
+        saxo_env: { type: string, enum: [sim, live], nullable: true, description: "Saxo only. Bitstamp's and Binance's env is fixed when their credentials are saved." }
         webhook_url: { type: string, nullable: true, description: "http/https endpoint for order/trade/fill events. PRO: a non-empty value on the free plan is a 400 naming the plan, so drop the field to launch without it. Ignored under options_routing, where the runner points the webhook at the options runtime." }
         options_routing:
           type: boolean
@@ -1544,6 +1600,7 @@ components:
         alpaca_us_symbol: { type: string, nullable: true, example: BTC/USD }
         saxo_uic: { type: integer, nullable: true, description: Null for crypto — Saxo cannot serve it. }
         bitstamp_pair: { type: string, nullable: true, example: btcusd }
+        binance_pair: { type: string, nullable: true, example: BTCUSDT, description: "Binance spot market. Quoted in USDT where the rest of the row is quoted in USD — a hand-checked per-venue mapping, so a backtest on USD bars and a Binance bot filling in USDT can diverge in a stablecoin depeg. Null disables Binance for this symbol, as a source and as a broker." }
         wikipedia_article: { type: string, nullable: true, example: GameStop, description: "en.wikipedia article title. NOT the ticker — GME is GameStop. Null disables the wikipedia source for this symbol." }
         reddit_query: { type: string, nullable: true, example: GME, description: "Search term for the reddit source. Tickers that are also English words need the cashtag form. Null disables it." }
         sec_cik: { type: string, nullable: true, example: "0000789019", description: "SEC EDGAR Central Index Key of the ISSUER. Null for every non-US listing: a foreign private issuer files a 20-F and is exempt from Section 16, so it has no Form 4 at any date." }
@@ -1559,6 +1616,23 @@ components:
           type: string
           enum: [sandbox, live]
           description: sandbox = demo funds (this venue's only paper mode). live = REAL MONEY.
+    BinanceCredentials:
+      type: object
+      required: [api_key, api_secret, env]
+      properties:
+        api_key: { type: string, description: "Secret, unlike an Alpaca key id: on Binance the key is the identity (X-MBX-APIKEY)." }
+        api_secret: { type: string }
+        env:
+          type: string
+          enum: [demo, testnet, live]
+          default: demo
+          description: >-
+            Selects a VENUE, not a mode on one account, and a key only works at the one that minted
+            it. demo = Demo Trading (demo-api.binance.com); keys come from the user's real Binance
+            account via demo.binance.com and it is demo execution against the LIVE tape, which makes
+            it the closest paper analogue of live trading on any broker here. testnet = Spot Testnet
+            (testnet.binance.vision), a separate account system with its own registration and its own
+            thin book. live = REAL MONEY (api.binance.com).
     PropFirmCredentials:
       type: object
       required: [firm_id, username, password, app_id, cid, sec]
