@@ -443,6 +443,178 @@ paths:
         "403":
           description: Plan does not permit validation jobs (requires Premium or higher).
 
+  /api/v1/jobs/hmm-train:
+    post:
+      operationId: trainHmmModel
+      tags: [Models]
+      summary: Fit a Gaussian HMM regime model over per-bar features. Premium or higher.
+      description: >-
+        A job launch like any other: 201 with a Job, then poll. The fitted model lands in the
+        registry under model_name, adding a VERSION rather than replacing the lineage, so a
+        strategy pinned to :2 keeps working. Two windows, not three — an HMM has no threshold to
+        choose, so it has no valid window. states is capped at 6: beyond that the states stop
+        having an interpretation and a refit relabels them. Basket feature sets (vmsc, vpc) take
+        `universe` instead of `symbol`, because a cross-sectional regime has no single instrument
+        behind it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeframe, data_source, model_name, train_from, train_to, test_from, test_to]
+              properties:
+                symbol: { type: string, description: "Required for every feature set except the basket ones." }
+                universe: { type: array, items: { type: string }, description: "Basket feature sets only." }
+                timeframe: { type: string, example: "1D" }
+                data_source: { type: string, example: yahoo }
+                model_name: { type: string, description: "Registry name; re-training adds a version." }
+                train_from: { type: string, format: date }
+                train_to: { type: string, format: date }
+                test_from: { type: string, format: date }
+                test_to: { type: string, format: date }
+                states: { type: integer, default: 3, maximum: 6 }
+                features: { type: string, default: "ret,vol" }
+                lens: { type: string, description: "Per-feature lookbacks, \"id:len,id:len\"." }
+                vol_window: { type: integer }
+                max_iter: { type: integer }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403":
+          description: Requires Premium, admin or dedicated.
+
+  /api/v1/jobs/clf-train:
+    post:
+      operationId: trainDirectionModel
+      tags: [Models]
+      summary: Fit a direction model (logistic regression over the next `horizon` bars). Premium or higher.
+      description: >-
+        Three windows, strictly ordered and non-overlapping, and the split is the point: the model
+        is fitted on train, its threshold is chosen on valid, and test is scored once and never
+        tuned against. train_to must precede valid_from and valid_to must precede test_from, or the
+        launch is refused — fitting and scoring on shared bars inflates every out-of-sample number.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, timeframe, data_source, model_name, horizon, train_from, train_to, valid_from, valid_to, test_from, test_to]
+              properties:
+                symbol: { type: string }
+                timeframe: { type: string, example: "1D" }
+                data_source: { type: string, example: yahoo }
+                model_name: { type: string }
+                horizon: { type: integer, description: "Label horizon in bars." }
+                train_from: { type: string, format: date }
+                train_to: { type: string, format: date }
+                valid_from: { type: string, format: date }
+                valid_to: { type: string, format: date }
+                test_from: { type: string, format: date }
+                test_to: { type: string, format: date }
+                features: { type: string }
+                lens: { type: string }
+                vol_window: { type: integer }
+                label_decay: { type: number }
+                dead_band: { type: number }
+                reward: { type: object, description: "Per-bar reward coefficients; each is capped at 5% per bar, and risk_unit divides so it may not be 0." }
+                max_iter: { type: integer }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403":
+          description: Requires Premium, admin or dedicated.
+
+  /api/v1/jobs/prf-train:
+    post:
+      operationId: trainTradeFilter
+      tags: [Models]
+      summary: Fit a trade filter to a STRATEGY's own trades. Premium or higher.
+      description: >-
+        Unlike the other two this fits to the trades a specific strategy took, so it needs
+        strategy_id. Same three-window rule as clf-train. `objective` decides what is estimated and
+        the two meaningless combinations are refused rather than ignored - "classify" (default)
+        fits a probability against `label`, while "quantile" estimates the trade's OWN return at a
+        percentile, so a `label` beside it is a 400 and `quantile` is required. A `quantile` sent
+        without the quantile objective is a 400, and so is 0 or 1, where the estimate is the sample
+        minimum or maximum and is decided by one trade.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy_id, symbol, timeframe, data_source, model_name, features, train_from, train_to, valid_from, valid_to, test_from, test_to]
+              properties:
+                strategy_id: { type: string, format: uuid }
+                symbol: { type: string }
+                timeframe: { type: string, example: "1D" }
+                data_source: { type: string, example: yahoo }
+                model_name: { type: string }
+                features: { type: array, items: { type: string } }
+                train_from: { type: string, format: date }
+                train_to: { type: string, format: date }
+                valid_from: { type: string, format: date }
+                valid_to: { type: string, format: date }
+                test_from: { type: string, format: date }
+                test_to: { type: string, format: date }
+                objective: { type: string, enum: [classify, quantile], default: classify }
+                quantile: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1, description: "Quantile objective only. 0.10 reads as 'one trade in ten from this setup is worse than the estimate'." }
+                label: { type: string, description: "Classify objective only." }
+                algo: { type: string }
+                universe: { type: array, items: { type: string }, description: "Required when a universe feature is selected, refused when none is." }
+                extra_series: { type: array, items: { type: object } }
+                lens: { type: string }
+                reward: { type: object }
+                min_trades: { type: integer }
+      responses:
+        "201":
+          description: Job created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400":
+          description: A refused objective/label/quantile combination, or overlapping windows.
+        "403":
+          description: Requires Premium, admin or dedicated.
+
+  /api/v1/models:
+    get:
+      operationId: listModels
+      tags: [Models]
+      summary: List your ONNX models, uploaded or trained here. Premium or higher.
+      responses:
+        "200":
+          description: Models, newest version per name last.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Model" }
+        "403":
+          description: Requires Premium, admin or dedicated.
+
+  /api/v1/jobs/{id}/states:
+    parameters:
+      - $ref: "#/components/parameters/PathId"
+    get:
+      operationId: getHmmStates
+      tags: [Models]
+      summary: The per-bar state sample of an HMM training run, proxied from the runner.
+      responses:
+        "200":
+          description: State sample.
+          content:
+            application/json:
+              schema: { type: object }
+
   /api/v1/jobs/live:
     post:
       operationId: launchLiveBot
@@ -1227,6 +1399,40 @@ components:
       required: true
       schema: { type: string, format: uuid }
   schemas:
+    Model:
+      type: object
+      description: >-
+        One version of an ONNX model. Uploading or re-training under an existing name adds a
+        version rather than replacing the lineage, so a strategy pinned to :2 keeps working.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer, description: "Auto-incremented per (account, name)." }
+        sha256: { type: string }
+        size_bytes: { type: integer }
+        input_dim: { type: integer, nullable: true }
+        output_dim: { type: integer, nullable: true }
+        training_job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The job that fitted it. Null for an uploaded model, which is the honest answer - it came from outside.
+        training_meta:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >-
+            How it was fitted, and the field to read BEFORE running anything against the model,
+            because the launch path enforces these facts at use time - symbol, timeframe,
+            data_source, features, lens, the train/valid/test windows, and per-window diagnostics
+            under train/validate/test (rows, auc, accuracy, base_rate, always_majority_accuracy,
+            lift). Read base_rate beside accuracy - on an imbalanced label, accuracy equal to
+            always_majority_accuracy means the model learned to answer "always the majority" and
+            lift is 0. kind is hmm, logistic_regression or prf, and each adds its own keys.
+            verified true means we watched the fit happen; the same field on an uploaded model is
+            only a claim carried inside the file.
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
     Strategy:
       type: object
       properties:
@@ -1592,7 +1798,12 @@ components:
       properties:
         id: { type: string, format: uuid }
         strategy_id: { type: string, format: uuid, nullable: true }
-        job_type: { type: string, enum: [backtest, sweep, robustness, stress, live] }
+        job_type:
+          type: string
+          enum: [backtest, portfolio_backtest, sweep, portfolio_sweep, robustness, stress, live, hmm_train, clf_train, prf_train]
+          description: >-
+            The three *_train values come from the model trainers. A basket or portfolio LIVE bot
+            still reports "live" — one container is one job, and only the config names the variant.
         status:
           type: string
           enum: [queued, pending, running, completed, failed, cancelled, timeout]

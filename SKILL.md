@@ -505,6 +505,48 @@ a stop. Two caveats worth stating to a user: only today's maintenance-margin lad
 anywhere, so a liquidation on old bars is a band rather than a dated event, and a book with one leg
 funded and one not looks identical in the totals — check `legs[].funding`.
 
+## Training a model on the platform
+
+Three trainers, all **Premium / admin / dedicated** and all ordinary job launches — `201` with a
+`Job`, then poll or `GET /jobs/{id}/wait`:
+
+```
+POST /jobs/hmm-train   regime model.   symbol (or universe for a basket feature set), timeframe,
+                       data_source, model_name, train_from/to, test_from/to. states defaults 3,
+                       capped at 6. NO valid window — an HMM has no threshold to choose.
+POST /jobs/clf-train   direction model. + horizon, and THREE windows.
+POST /jobs/prf-train   trade filter fitted to a STRATEGY's own trades. + strategy_id, features[],
+                       and THREE windows.
+```
+
+Five things to get right, and the first two are refusals rather than advice:
+
+- **The three windows are strictly ordered and non-overlapping** (`train_to < valid_from`,
+  `valid_to < test_from`) and a launch that breaks that is a `400`. The split IS the method: fit on
+  train, choose the threshold on valid, score test once and never tune against it.
+- **`prf-train`'s `objective`** is `classify` (default, fits a probability against `label`) or
+  `quantile` (estimates the trade's OWN return at a percentile). A `label` beside `quantile` is
+  refused, `quantile` is required with it and must be strictly between 0 and 1, and a `quantile`
+  without that objective is refused. Each refusal exists because the caller would otherwise believe
+  the fit was about something it is not.
+- **Re-training under an existing `model_name` adds a VERSION**, it does not replace one, so a
+  strategy pinned to `:2` keeps working.
+- **Read the fit before you use it.** `GET /jobs/{id}/results` carries the full record — the
+  `train`/`validate`/`test` window stats, the fitted parameters, and `feature_pine`, the Pine lines
+  that reproduce the feature vector **in the order the model expects** (nothing checks that order at
+  runtime, so a hand-written `array.from` in the wrong order is a silent wrong answer). The same
+  summary is condensed onto the model row as `training_meta`. For an HMM, `GET /jobs/{id}/states`
+  returns the per-bar state sample.
+- **Report `base_rate` beside `accuracy`.** On an imbalanced label, an accuracy equal to
+  `always_majority_accuracy` means the model learned to answer "always the majority" and `lift` is
+  `0`. Quoting the accuracy alone turns that into a result.
+
+Then remember the model is a fit to **one instrument, one timeframe, one stretch of history**, and
+the platform enforces that when you USE it: a backtest or sweep whose range overlaps
+`train_from..train_to` is refused, so plan the evaluation window outside the fit window; so is a
+significance or stress run on a model-pinned strategy, and a single-name model served a different
+symbol or timeframe. Live is exempt from the window rule only.
+
 ## Endpoint catalog
 
 | Area | Endpoints |
@@ -515,7 +557,7 @@ funded and one not looks identical in the totals — check `legs[].funding`.
 | Fleet snapshot | `GET/POST /api/v1/jobs/live/snapshot`, `POST /api/v1/jobs/live/snapshot/restore` |
 | Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` (price **and** the non-price attention / insider / sentiment sources) |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
-| Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
+| Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train`, `GET /api/v1/jobs/{id}/states` (HMM state sample) |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,binance,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/binance/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
 | GitHub | `GET /api/v1/auth/github/{repos,files,file}`, `POST /api/v1/auth/github/sync-webhook` (linking itself is browser-only) |
 | Account | `GET/PATCH/DELETE /api/v1/auth/me`, `POST /api/v1/auth/telegram/test`, `GET/PUT /api/v1/newsletter/me` (newsletter opt-in/out), `GET/POST /api/v1/auth/keys` (key mgmt is session-only, not via key), `DELETE /api/v1/auth/keys/{id}` |
@@ -564,8 +606,8 @@ Two **PineconeX-exclusive namespaces** have no TradingView equivalent, so a plai
 won't know them:
 
 * **`ml.*`** — run a pre-trained ONNX model in-strategy (`ml.predict(name, features)` →
-  `series float`). Upload the model on the Models page; **Premium** feature. Needs
-  `//@runtime=2026.07.16-ml` or newer.
+  `series float`). Upload the model, or fit one here with the three trainers below; **Premium**
+  feature. Needs `//@runtime=2026.07.16-ml` or newer.
 * **`gex.*`** — dealer **gamma exposure**: `gex.net` (regime sign), `gex.flip` (zero-gamma pivot),
   `gex.pin` (magnet strike), `gex.call_wall`/`gex.put_wall` (± walls), `gex.g1..g5` (ranked strikes) —
   all `series float`. Needs `//@runtime=2026.08.06-gex`+. **Availability caveat:** live GEX is fetched
