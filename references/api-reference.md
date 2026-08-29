@@ -254,9 +254,29 @@ sha256        string     (hex digest of the .onnx bytes)
 size_bytes    int
 input_dim     int | null
 output_dim    int | null
+training_job_id  uuid | null    (the job that fitted it; null = uploaded from outside)
+training_meta    object | null  (how it was fitted — see below; null = uploaded from outside)
 created_at    datetime
 last_used_at  datetime | null
 ```
+
+**`training_meta` is the field to read before you run anything against a model**, because it holds
+the facts the launch path later enforces (see the paragraph at the end of this section): `symbol`,
+`timeframe`, `data_source`, `features`, `lens`, `train_from`/`train_to`, `valid_from`/`valid_to`,
+`test_from`/`test_to`, and the per-window diagnostics under `train` / `validate` / `test` —
+`rows`, `auc`, `accuracy`, `base_rate`, `always_majority_accuracy` and `lift`. Read the base rate
+beside the accuracy: on an imbalanced label, `accuracy` equal to `always_majority_accuracy` means
+the model learned to answer "always the majority" and `lift` is `0`.
+
+Per-kind extras: `kind` is `hmm` / `logistic_regression` / `prf`; an HMM adds `states`, `means`,
+`variances`, `transition`, `converged` and the log-likelihoods; a classifier adds `horizon` and
+`feature_dim`; a PRF adds `algo`, `label`, `min_trades`, `importance`, `shap`, `threshold_table`
+and, for a multi-symbol fit, `files` / `symbols` / `trades_per_symbol`.
+
+`verified: true` means **we watched the fit happen** — the model came from a training job on this
+platform. The same field on an uploaded model is only a claim carried inside the file, so treat it
+as provenance, not proof. `training_job_id` and `training_meta` are both `null` for every uploaded
+model, and that absence is the honest answer: it was brought in from outside.
 
 ### POST /api/v1/models — upload
 ```
@@ -313,8 +333,41 @@ POST /jobs/prf-train    — trade filter (tree ensemble scored on a STRATEGY's o
   features     string[] required
   train_from, train_to, valid_from, valid_to, test_from, test_to    date, required
   extra_series array    optional  (extra input series)
+  objective    string   optional  ("classify" default | "quantile")
+  quantile     float    optional  (quantile objective only, strictly 0 < q < 1)
   label, algo, universe, lens, reward, min_trades                   optional
 ```
+
+**`objective` decides what the filter estimates**, and the two wrong combinations are refused
+rather than ignored, because each means the fit is about something other than what the caller
+believes:
+
+- `classify` (the default) fits a probability against `label`.
+- `quantile` estimates **the trade's own return at a percentile**, so there is no label to fit. A
+  `label` sent beside it is a `400`, and `quantile` is required — `0.10` reads as "one trade in ten
+  from this setup is worse than the estimate".
+- `quantile` without `objective: "quantile"` is a `400` (a classifier has no quantile to estimate),
+  and so is a value at `0` or `1`, where the estimate is the sample minimum or maximum and is
+  decided by one trade.
+
+The three windows are **strictly ordered and non-overlapping** on `clf-train` and `prf-train`, and
+the API refuses otherwise: `train_to < valid_from` and `valid_to < test_from`. Fitting and scoring
+on shared bars inflates every out-of-sample number, and picking the threshold on the window that is
+then reported as held-out makes the report a description of that choice.
+
+**Reading a finished training run.** A trainer writes an ordinary `results.json`, so
+`GET /api/v1/jobs/{id}/results` works exactly as it does for a backtest and carries the fit in
+full: the three `WindowStats` blocks (`train` / `validate` / `test`), the feature list and
+`feature_dim`, the fitted parameters (a classifier's `weights` / `intercept` / `feature_means` /
+`feature_sds`, an HMM's `means` / `variances` / `transition`), `onnx_output_layout`, and
+`feature_pine` — the Pine lines that reproduce the feature vector **in the order the model
+expects**, which is what a strategy has to mirror exactly and what nothing checks at runtime. The
+same summary is condensed onto the model row as `training_meta`, so the registry answers "where did
+this come from?" long after the job is gone.
+
+**`GET /api/v1/jobs/{id}/states`** returns an HMM run's per-bar state sample, proxied from the
+runner. It is a separate endpoint on purpose: a couple of thousand points folded into the model row
+would be downloaded once per model just to render a name.
 
 A model is a fit to **one instrument, one timeframe and one stretch of history**, and the launch
 path enforces that at USE time as well: a backtest or sweep whose date range overlaps the model's
@@ -337,7 +390,8 @@ scheduler starts it when capacity frees up.
 ```
 id             uuid
 strategy_id    uuid | null
-job_type       "backtest" | "sweep" | "robustness" | "stress" | "live"
+job_type       "backtest" | "portfolio_backtest" | "sweep" | "portfolio_sweep" | "robustness"
+               | "stress" | "live" | "hmm_train" | "clf_train" | "prf_train"
 status         "queued" | "pending" | "running" | "completed" | "failed" | "cancelled" | "timeout"
 container_id   string | null
 config         object            (serialized JobConfig; varies by job_type)
@@ -1297,6 +1351,9 @@ Your own jobs, newest first, hard-capped at **50**. There are no query parameter
 - **robustness** — `p_value`, `observed_stat`, `null_dist[]` (+ mean/sd/percentiles), `hurst` /
   `variance_ratio`, and the echoed `permutations` / `block_size` / `metric` / `seed`
 - **stress** — `calibration` + `cells[]` (see the stress endpoint above)
+- **hmm_train / clf_train / prf_train** — the fit: `train` / `validate` / `test` window stats, the
+  feature list, the fitted parameters and `feature_pine`. See *Training a model on the platform*
+  above, and `GET /api/v1/jobs/{id}/states` for an HMM's per-bar state sample
 
   A trial also carries `plateau` when the run was annotated and `bootstrap` when it ran with
   `bootstrap: true` — see the two robustness axes above for how to rank on either.
