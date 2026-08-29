@@ -228,16 +228,25 @@ if the bars are **exchangeable**, and serial dependence breaks that. `block_size
 alone**. It is a property of the instrument, not a preference, and a number you pick is a number
 you guessed.
 
-## Non-price series: attention and insider dealing
+## Non-price series: attention, insider dealing, sentiment, fundamentals
 
-Four `data_source` values carry something other than a price, on their own prefixed symbols:
+Five `data_source` values carry something other than a price, on their own prefixed symbols:
 
 ```
 wikipedia -> WIKI:<ticker>      pageviews, 2015+
 reddit    -> REDDIT:<ticker>    post and author counts, 2005+
 secform4  -> SECFORM4:<ticker>  SEC insider open-market dealing in dollars, 2003+, US issuers only
 google    -> GOOGLE:<ticker>    search interest (NOT reproducible, see below)
+cnn       -> CNN:FEARGREED      Fear & Greed, whole US market, rolling one-year window
 ```
+
+A sixth prefix, `ESEF:<ticker>`, carries annual accounting factors for 73 BE/NL issuers and is
+**preloaded, not fetchable** — there is no `esef` source to POST. It is also the one derived
+namespace with no field names: read the slots (`open` op, `high` inv, `low` book-to-market, `close`
+market cap, `volume` share count). Two things to say before anyone builds on it: each name carries
+only four or five annual observations (enough to rank a cross-section today, not to backtest a
+factor sort), and a book must exclude these rows by `syminfo.tickerid`, never `syminfo.ticker` —
+`ESEF:WDP` has the bare ticker `WDP` and was once traded as if it were the stock.
 
 Fetch them exactly like price data (`POST /api/v1/data/fetch` with that `source`), then read them
 in Pine **by named field**, never `open`/`close` — a non-price series has no prices, so each of the
@@ -250,7 +259,7 @@ topper  = request.security("REDDIT:GME",    "1D", topAuthorPosts)
 flow    = request.security("SECFORM4:MSFT", "1D", insiderFlowUsd)
 ```
 
-The full field table is in the API reference. Four things to tell a user before they act on one:
+The full field table is in the API reference. Five things to tell a user before they act on one:
 
 - **`insiderFlowUsd` is cumulative** — the signal is `flow - flow[90]`, not the level.
 - **Only Form 4 codes `P`/`S` count.** Grants, option exercises and tax withholding are
@@ -260,10 +269,14 @@ The full field table is in the API reference. Four things to tell a user before 
 - **`GOOGLE:` is not reproducible.** Google rescales each response to the requested window and
   samples, so re-fetching returns different history. Every other dataset here does not do this.
   A backtest over it is one draw, not a measurement — say so rather than reporting it like the rest.
+- **`CNN:FEARGREED` is one series for the whole market**, not a reading on the symbol you pair it
+  with, and it serves only a rolling year: fetch it repeatedly to deepen the history, since asking
+  for a wider range returns nothing older. `fearGreedScore` is 0-100; `fearGreedBand` is CNN's own
+  rating as `1` extreme fear … `5` extreme greed, never re-derived from the score.
 
 A symbol only offers a source it is mapped for (`wikipedia_article`, `reddit_query`, `sec_cik`,
-`google_trends_query` on `GET /api/v1/data/symbols`); a null means that source is unavailable for
-it. `SECFORM4:` is **US-registered issuers only** — a foreign private issuer files a 20-F and is
+`google_trends_query`, `cnn_series` on `GET /api/v1/data/symbols`); a null means that source is
+unavailable for it. `SECFORM4:` is **US-registered issuers only** — a foreign private issuer files a 20-F and is
 exempt from Section 16, so ASML has no Form 4 at any date.
 
 ```
@@ -481,19 +494,26 @@ refuses intraday beyond 730 days and Alpaca's crypto history starts in 2021, whi
 public series reaches back to 2011 (no key needed; `1m 5m 15m 30m 60m 1D`). `binance` is public
 too (`1m 5m 15m 30m 60m 240m 1D 1W 1M`). Both also carry **perpetual futures** — 20 rows on
 Bitstamp, 10 on Binance, under `index_name` `"Perpetual Futures (…)"` with a `.P` suffix on
-`tv_symbol`. Those are `live_tradable = false`: data and backtests only, because Pine has no model
-of funding, leverage or liquidation. A `.P` row and the spot pair of the same name are different
-instruments.
+`tv_symbol`. Those are `live_tradable = false`: data and backtests only, since no broker arm here
+trades a perpetual. A `.P` row and the spot pair of the same name are different instruments.
+
+A batch run on one **does** book funding and model liquidation, staged server-side with nothing to
+pass. Report `summary.funding` beside net rather than folded into it (`booked_pct`,
+`traded_pnl_pct`, `total_pnl_pct`, and `included_in_net`, which says whether that engine already
+added it), and treat an `exit_reason: "Liquidated"` trade as the venue closing the position, not as
+a stop. Two caveats worth stating to a user: only today's maintenance-margin ladder exists
+anywhere, so a liquidation on old bars is a band rather than a dated event, and a book with one leg
+funded and one not looks identical in the totals — check `legs[].funding`.
 
 ## Endpoint catalog
 
 | Area | Endpoints |
 |---|---|
-| Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share` |
+| Strategies | `GET/POST /api/v1/strategies`, `GET/PUT/DELETE /api/v1/strategies/{id}`, `GET /api/v1/strategies/{id}/inputs`, `GET/PUT /api/v1/strategies/{id}/params`, `POST /api/v1/strategies/{id}/share`, `POST /api/v1/strategies/from-github`, `POST /api/v1/strategies/from-template` (Pro or Premium per template; ids in the reference) |
 | Validate | `POST /api/v1/validate` |
 | Jobs | `GET /api/v1/jobs`, `POST /api/v1/jobs/{backtest,sweep,robustness,stress,live}`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/wait`, `POST /api/v1/jobs/wait`, `GET /api/v1/jobs/{id}/results`, `GET /api/v1/jobs/{id}/logs` (SSE), `DELETE /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/analyse` |
 | Fleet snapshot | `GET/POST /api/v1/jobs/live/snapshot`, `POST /api/v1/jobs/live/snapshot/restore` |
-| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` (price **and** the non-price attention/insider sources) |
+| Data | `GET /api/v1/data/symbols`, `GET /api/v1/data/catalog`, `GET /api/v1/data/structure`, `POST /api/v1/data/fetch` (price **and** the non-price attention / insider / sentiment sources) |
 | ML models (Premium) | `GET/POST /api/v1/models`, `DELETE /api/v1/models/{id}` |
 | Train a model (Premium) | `POST /api/v1/jobs/hmm-train`, `/jobs/clf-train`, `/jobs/prf-train` |
 | Brokers | `GET /api/v1/{alpaca,saxo,ibkr,lightspeed,bitstamp,binance,propfirm}/status`, `POST /api/v1/bitstamp/credentials`, `POST /api/v1/binance/credentials`, `POST /api/v1/alpaca/keys`, `POST /api/v1/lightspeed/credentials`, `POST /api/v1/ibkr/settings`, `GET /api/v1/propfirm/firms`, `POST /api/v1/propfirm/credentials`, `DELETE /api/v1/{…}/disconnect` |
