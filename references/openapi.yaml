@@ -215,6 +215,43 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Strategy" }
 
+  /api/v1/strategies/from-template:
+    post:
+      operationId: createStrategyFromTemplate
+      tags: [Strategies]
+      summary: Create a strategy from a built-in template. Pro or Premium depending on the template.
+      description: >-
+        A template's tier is the tier its DEPENDENCIES sit behind, not a pricing choice. Premium
+        ids (403 below it): hmm-basket-regime, hmm-regime-gate, hmm-regime-sizing, logit-direction
+        (each needs a trained ONNX model, and both the registry and the trainers are Premium), plus
+        quick-flip-scalper, three-bar-inside-continuation, gap-fade, ma-rsi-linreg,
+        macd-multi-timeframe, order-block (each reads a second timeframe off its OWN symbol, which
+        every launcher refuses below Premium). Every other id is Pro. The full id list is in the
+        endpoint reference. An unknown id answers 404 BEFORE the plan is checked, so this cannot be
+        used to enumerate ids, and no response ever contains the template source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template_id]
+              properties:
+                template_id:
+                  type: string
+                  example: pair-spread
+                  description: Id of a built-in template.
+      responses:
+        "201":
+          description: Created strategy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+        "403":
+          description: Your plan is below the template's tier.
+        "404":
+          description: No such template id.
+
   /api/v1/strategies/{id}/grant:
     parameters:
       - $ref: "#/components/parameters/PathId"
@@ -1313,7 +1350,7 @@ components:
         data_source:
           type: string
           example: yahoo
-          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google]
+          enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google, cnn]
           description: >-
             A source only serves symbols it has a ticker for (see the Symbol schema); a null
             ticker is a 400. yahoo: equities + crypto, no account, but NO intraday older than
@@ -1327,12 +1364,16 @@ components:
             market. A .P symbol is a perpetual, a different instrument from the spot pair of the
             same name, and is data-only (live_tradable false).
             NON-PRICE sources, 1D only, each on its own prefixed symbol (WIKI:, REDDIT:,
-            SECFORM4:, GOOGLE:) and read in Pine by named field rather than open/close —
+            SECFORM4:, GOOGLE:, CNN:) and read in Pine by named field rather than open/close —
             wikipedia: pageviews from 2015. reddit: post and author counts from 2005.
             secform4: SEC insider open-market dealing in dollars from 2003, US-registered
             issuers only (a foreign private issuer is exempt from Section 16 and never files).
             google: search interest — NOT REPRODUCIBLE, because Google rescales every response
             to the requested window and samples, so a re-fetch returns different history.
+            cnn: CNN's Fear & Greed index on the single symbol CNN:FEARGREED, describing the
+            whole US market rather than an instrument, and serving a ROLLING ONE-YEAR window —
+            history deepens by re-fetching and merging, not by asking for a wider range.
+            A sixth prefix, ESEF:, carries preloaded accounting factors and has no source value.
         htf_timeframe: { type: string, nullable: true, description: "Higher timeframe for request.security. PREMIUM: sending this on free/pro is a 400 naming the plan, and so is a strategy whose own request.security reads a timeframe other than the chart's — the server derives the HTF from the strategy when this is omitted, so leaving it out does not avoid the gate." }
         htf_data_source: { type: string, nullable: true }
         intrabar_timeframe: { type: string, nullable: true }
@@ -1369,7 +1410,7 @@ components:
         timeframe: { type: string, example: "1D", description: "1D, 1W, 240m, 60m, 30m, 15m, 5m" }
         from_date: { type: string, format: date }
         to_date: { type: string, format: date }
-        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google] }
+        data_source: { type: string, example: saxo, enum: [yahoo, saxo, massive, ibkr, alpaca, bitstamp, binance, wikipedia, reddit, secform4, google, cnn] }
         initial_capital: { type: number, default: 100000, description: "Shared book account size. percent_of_equity sizing is a share of the whole book, not per symbol." }
         leverage: { type: number, default: 2.0, description: "Gross-exposure cap as a multiple of book equity (Sum|leg notional| <= leverage x equity). 2.0 = full long + full short (dollar-neutral); 1.0 caps total exposure at the account size." }
     PortfolioBacktestRequest:
@@ -1605,6 +1646,9 @@ components:
         reddit_query: { type: string, nullable: true, example: GME, description: "Search term for the reddit source. Tickers that are also English words need the cashtag form. Null disables it." }
         sec_cik: { type: string, nullable: true, example: "0000789019", description: "SEC EDGAR Central Index Key of the ISSUER. Null for every non-US listing: a foreign private issuer files a 20-F and is exempt from Section 16, so it has no Form 4 at any date." }
         google_trends_query: { type: string, nullable: true, example: NVDA, description: "Search term for the google source. NVDA and 'NVDA stock' are materially different series, so the choice is stored rather than derived." }
+        cnn_series: { type: string, nullable: true, example: fearandgreed, description: "Which CNN dataviz series this row carries. Only CNN:FEARGREED has one; null disables the cnn source. Set by migration, not over the API." }
+        unusualwhales_ticker: { type: string, nullable: true, example: NVDA, description: "Gates this symbol's option-chain history, which is what gex.* reads. US options-listed names only; null means no chain there, which is different from a chain that reads as empty." }
+        futures_root: { type: string, nullable: true, example: MES, description: "The TRADOVATE root, i.e. whether this product exists at the prop-firm gateway. Null on the Eurex and Euronext futures rows, which are CME-absent." }
         live_tradable: { type: boolean, description: "False marks a data-only row: it backtests and sweeps, but live launch refuses it." }
     BitstampCredentials:
       type: object

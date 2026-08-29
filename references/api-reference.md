@@ -29,6 +29,48 @@ Response `201`: `StrategyResponse` (below). `name`/`description` are parsed from
 Request: `{ "stem": "<file stem>" }`. Imports the tracked Pine file of that stem from your
 connected GitHub repo as a strategy. Response `201`: `StrategyResponse`.
 
+### POST /api/v1/strategies/from-template — create from a built-in template
+Request: `{ "template_id": "<id>" }`. Response `201`: `StrategyResponse`. The source is never
+returned by any other route, and an unknown id answers `404` **before** the plan is checked, so the
+endpoint cannot be used to enumerate ids — they are listed here instead.
+
+**A template's tier is the tier its dependencies already sit behind**, computed from the source
+rather than declared, because a template sold below what it needs is a door onto a wall: the
+strategy is created and then refused on the one thing it was written to do.
+
+**Premium** (`403` below it) — the four model-driven templates need a trained ONNX model, and both
+the registry and the trainers are Premium; the rest read a second timeframe off their **own** symbol,
+which `derive_htf` refuses below Premium from every launcher:
+
+```
+hmm-basket-regime  hmm-regime-gate  hmm-regime-sizing  logit-direction
+quick-flip-scalper  three-bar-inside-continuation  gap-fade  ma-rsi-linreg
+macd-multi-timeframe  order-block
+```
+
+**Pro** (`403` on free) — everything else, 44 ids:
+
+```
+pair-spread  variance-ratio  cross-sectional-momentum  faber-taa  momentum-quiet-tape
+herding-dispersion  safe-haven-rotation  calendar-seasonality  seasonal-calendar
+cointegration-pair  kalman-pair  bollinger-band-touch  markov-states
+factor-residual-reversal  sector-rotation  round-number-barriers  three-bar-reversal
+three-bar-continuation  three-bar-inside-breakout  three-bar-momentum-shift
+three-bar-strong-close  three-bar-random-control  pivot-mean-reversion
+narrow-range-breakout  three-inside-up-down  three-outside-up-down
+triple-inside-bar-breakout  casey-bands  casey-bands-percent-c  casey-bands-combo
+casey-bands-width  ichimoku-cloud-pierce  leveraged-long-run  macd-ema-swing
+nr4-breakout  nr7-breakout  connors-r3  trama-trendline-rsi  volatility-squeeze-breakout
+volume-profile-value-reversion  ascending-triangle-break  ascending-triangle-fade
+webhook-json  telegram-alerts
+```
+
+A cross-**symbol** `request.security` is deliberately not a gate: it provisions a peer series and is
+open to every plan, which is why the pair and rotation templates sit at Pro rather than Premium.
+`webhook-json` and `telegram-alerts` are Pro because the features they document are — a
+`webhook_url` on a live launch is refused by name below Pro, and Telegram credentials cannot be
+saved at all.
+
 ### GET /api/v1/strategies — list
 Response: array of `StrategyResponse`.
 
@@ -1238,7 +1280,9 @@ Your own jobs, newest first, hard-capped at **50**. There are no query parameter
 `limit`/`offset`, no status or type filter, no pagination cursor. Filter client-side.
 ### GET /api/v1/jobs/{id} — one `JobResponse` (status synced from runner if still running)
 ### GET /api/v1/jobs/{id}/results — metrics JSON (shape varies by job_type)
-- **backtest** — performance metrics + `hurst` / `variance_ratio`
+- **backtest** — performance metrics + `hurst` / `variance_ratio`, and on a perpetual
+  `summary.funding` beside the price leg (see *Perpetual futures* under Data for the keys, and for
+  the `"Liquidated"` exit reason a levered run can produce)
 
 > **Removed 2026-08-03: results no longer carry a `price_structure` block.** It described the
 > PRICE SERIES, so it was identical for every strategy ever run on that dataset — the same numbers
@@ -1380,24 +1424,26 @@ A source can only serve a symbol it has a ticker for — the per-symbol tickers 
 | `wikipedia` | Attention, anything with an article | **Non-price.** Daily pageviews from 2015-07-01. No account needed. `1D` only. |
 | `reddit` | Attention, US retail names | **Non-price.** Daily post counts across r/wallstreetbets, r/stocks and r/investing, from 2005. `1D` only. |
 | `secform4` | Insider dealing, **US-registered issuers only** | **Non-price.** SEC Form 4 open-market purchases and sales in dollars, from 2003. A foreign private issuer files a 20-F and is exempt from Section 16, so it never files one at any date. `1D` only. |
-| `google` | Attention, any search term | **Non-price, and NOT REPRODUCIBLE** — see the warning below. Daily search interest. `1D` only. |
+| `google` | Attention, any search term | **Non-price, and NOT REPRODUCIBLE** — see the warning below. Daily search interest, fetched with a **US** geography. `1D` only. |
+| `cnn` | Sentiment, the **whole US market** | **Non-price.** CNN's Fear & Greed index, score and band. No account or key needed. Serves a **rolling one-year window** only, so history deepens by re-fetching and merging rather than by asking for a wider range; the readings are absolute 0-100, so two fetches agree on any day they share. `1D` only, and the only symbol carrying it is `CNN:FEARGREED`. |
 
 **Use `bitstamp` for deep intraday crypto history.** It is the only source that reaches it:
 Yahoo cuts intraday off at 730 days and Alpaca's crypto data begins in 2021, while Bitstamp's
 public series goes back to **2011** and quotes real BTC/USD (not USDT). A multi-year hourly
 Bitcoin backtest — the window the MCPT literature uses — is only reproducible from this source.
 
-### Non-price series (attention and disclosure)
+### Non-price series (attention, disclosure, sentiment, fundamentals)
 
-Four sources carry something other than a price. They are ordinary catalog datasets — fetched the
+Five sources carry something other than a price. They are ordinary catalog datasets — fetched the
 same way, cached the same way, read with `request.security` — but they live on their **own symbols**,
-prefixed by the publisher:
+prefixed by the publisher. A sixth prefix, `ESEF:`, is preloaded rather than fetchable (see below):
 
 ```pine
 views = request.security("WIKI:ASML",     "1D", pageviews)
 posts = request.security("REDDIT:GME",    "1D", mentionCount)
 flow  = request.security("SECFORM4:MSFT", "1D", insiderFlowUsd)
 si    = request.security("GOOGLE:NVDA",   "1D", searchInterest)
+mood  = request.security("CNN:FEARGREED", "1D", fearGreedScore)
 ```
 
 The prefix names **who published the number**, never what it measures. A single `ATTENTION:`
@@ -1409,17 +1455,24 @@ they carry different information and diverge most in stressed markets.
 no prices to put in them, so each column carries a different figure under a name that says what it
 holds. **Do not write `open` or `close` on these symbols.**
 
-| Column | `WIKI:` | `REDDIT:` | `SECFORM4:` | `GOOGLE:` |
-|---|---|---|---|---|
-| 1 | `pageviews` | `mentionCount` | `insiderFlowUsd` | `searchInterest` |
-| 2 | `mobileViews` | `mentionScore` | `transactionShares` | `searchInterestRaw` |
-| 3 | `desktopViews` | `mentionComments` | `transactionPricePerShare` | *(none)* |
-| 4 | `spiderViews` | `topAuthorPosts` | `insiderSharesHeld` | *(none)* |
-| 5 | `pageEdits` | `distinctAuthors` | `transactionCount` | `windowsCovering` |
+| Column | `WIKI:` | `REDDIT:` | `SECFORM4:` | `GOOGLE:` | `CNN:` |
+|---|---|---|---|---|---|
+| 1 | `pageviews` | `mentionCount` | `insiderFlowUsd` | `searchInterest` | `fearGreedScore` |
+| 2 | `mobileViews` | `mentionScore` | `transactionShares` | `searchInterestRaw` | `fearGreedBand` |
+| 3 | `desktopViews` | `mentionComments` | `transactionPricePerShare` | *(none)* | *(none)* |
+| 4 | `spiderViews` | `topAuthorPosts` | `insiderSharesHeld` | *(none)* | *(none)* |
+| 5 | `pageEdits` | `distinctAuthors` | `transactionCount` | `windowsCovering` | *(none)* |
 
-`GOOGLE:` has three names rather than five because the source provides one number per day. The two
-unused columns are deliberately **not addressable** — a strategy can name what exists and cannot
-name what does not.
+`GOOGLE:` has three names and `CNN:` two, because those sources provide fewer quantities than a bar
+has slots. The unused columns repeat another value and are deliberately **not addressable** — a
+strategy can name what exists and cannot name what does not.
+
+**`CNN:FEARGREED` describes the market, not an instrument**, which is why it has no ticker: the
+prefix names who published the number and `FEARGREED` is what CNN publishes. `fearGreedScore` is a
+0-100 float (the public page rounds it to an integer) and `fearGreedBand` is CNN's own rating as an
+ordinal — `1` extreme fear, `2` fear, `3` neutral, `4` greed, `5` extreme greed — mapped straight
+across from their string and never re-derived from the score, because the thresholds are theirs and
+have moved before. Read it against any symbol; it is the same series either way.
 
 **Reddit's author fields are the reason to use that series.** A post count cannot separate
 coordinated posting from genuine interest. Counting who posted can:
@@ -1440,7 +1493,7 @@ grants, option exercises and shares withheld to pay tax on a vesting are compens
 decisions, and counting them is what produces the "insiders are dumping" headline every time a grant
 vests.
 
-**All four are publication-shifted by one day.** A day's figure is complete only once the day is
+**All five are publication-shifted by one day.** A day's figure is complete only once the day is
 over, so a bar is dated the session its number could first be acted on. You do not need `[1]`.
 
 > **`GOOGLE:` is not reproducible, and that is a property of the source.** Google scales every
@@ -1455,7 +1508,44 @@ over, so a bar is dated the session its number could first be acted on. You do n
 > symbol it is read from. `WIKI:ABN` where no such symbol exists is an error rather than a quiet
 > substitution of ABN's price series, and `pageviews` read from a price symbol is refused rather
 > than silently returning that stock's close. Both would otherwise run, report plausible numbers,
-> and measure the wrong quantity.
+> and measure the wrong quantity. The guarded prefixes are `WIKI:`, `REDDIT:`, `SECFORM4:`,
+> `GOOGLE:`, `CNN:` and `ESEF:`.
+
+#### `ESEF:` — accounting factors, preloaded rather than fetchable
+
+`ESEF:<ticker>` carries annual accounting factors for **73 Belgian and Dutch issuers**, computed
+from their own inline-XBRL annual reports (`index_name` **"Factors (ESEF)"**, `live_tradable =
+false`). There is no `esef` value for `POST /api/v1/data/fetch`: the datasets ship preloaded in the
+catalog under `source: "esef"`, `1D`, so read them and do not try to refresh them.
+
+It is the one derived namespace with **no field names**, so you address the slots directly:
+
+| Slot | Quantity | Definition |
+|---|---|---|
+| `open` | operating profitability | operating result / book equity |
+| `high` | investment | year-on-year growth in total assets |
+| `low` | book-to-market | book equity / market cap at the available date |
+| `close` | size | market capitalisation, EUR |
+| `volume` | share count | profit attributable to owners / basic EPS |
+
+```pine
+bm = request.security("ESEF:ABN", "1D", low)     // book-to-market
+op = request.security("ESEF:ABN", "1D", open)    // operating profitability
+```
+
+> **Never let a factor row into a book's tradable legs, and do not filter on `syminfo.ticker`.**
+> `syminfo` splits on the `:`, so `ESEF:WDP` has the bare ticker `WDP` and matches the price row's
+> own name — test `syminfo.tickerid`. Before that guard the row was traded as an instrument,
+> entering at 0.166 (the `open` slot) and exiting at 4,799,376,734 (the `close` slot), booking
+> +574,618,885,032%.
+
+> **Point-in-time, and short.** Each value is forward-filled from the date its filing was
+> *published*, never from the fiscal period end, and bars before a company's first filing are NULL
+> rather than back-filled. ESEF is mandatory only from FY2020, so a name carries four or five
+> annual observations: enough to rank a cross-section today, **not** enough to backtest a factor
+> sort, which needs the factor to vary across names *and* across time. Values are EUR throughout —
+> facts reported in USD or GBP were dropped, because size and book-to-market are not
+> currency-invariant.
 
 ### GET /api/v1/data/symbols → array
 ```
@@ -1463,14 +1553,21 @@ id, tv_symbol, tv_full_symbol, display_name, index_name,
 yahoo_ticker|null, massive_ticker|null, ibkr_symbol|null, alpaca_us_symbol|null,
 saxo_uic|null, bitstamp_pair|null, binance_pair|null,
 wikipedia_article|null, reddit_query|null, sec_cik|null, google_trends_query|null,
+cnn_series|null, unusualwhales_ticker|null, futures_root|null,
 live_tradable  bool,
 strategy_profile  string|null
 ```
 
-The last four gate the non-price sources exactly as the broker tickers gate the price ones: a
-`null` means that source is not offered for the symbol. None is derivable from the ticker, which
-is why each is stored rather than inferred — `GME` is `GameStop` on Wikipedia, Microsoft's CIK is
-`0000789019`, and `NVDA` and `NVDA stock` are materially different Google Trends series.
+`wikipedia_article`, `reddit_query`, `sec_cik`, `google_trends_query` and `cnn_series` gate the
+non-price sources exactly as the broker tickers gate the price ones: a `null` means that source is
+not offered for the symbol. None is derivable from the ticker, which is why each is stored rather
+than inferred — `GME` is `GameStop` on Wikipedia, Microsoft's CIK is `0000789019`, and `NVDA` and
+`NVDA stock` are materially different Google Trends series. `unusualwhales_ticker` gates the
+option-chain history behind `gex.*` the same way, and is US options-listed names only.
+
+`futures_root` here is the **Tradovate** root, and it answers "is this product at the prop-firm
+gateway" rather than naming a spelling. It is `null` on the Eurex and Euronext rows, which are
+CME-absent: offering a prop-firm download for one is a fetch that fails at the gateway.
 
 
 **`wikipedia_article` may hold a title CHAIN, `current|former`, summed per day** — `Amazon
@@ -1517,10 +1614,30 @@ DOGEUSD AVAXUSD LINKUSD DOTUSD LTCUSD BCHUSD ATOMUSD UNIUSD AAVEUSD`).
 
 **Perpetual futures are DATA ONLY.** `index_name` **"Perpetual Futures (Crypto)"** / **"(Macro)"**
 (Bitstamp, 20 rows) and **"Perpetual Futures (Binance)"** (10 rows) are fetchable and backtestable
-with `live_tradable = false`, so a live launch on one is refused. Pine's cash-equity model has no
-leverage, funding or liquidation, and the bot has no concept of a position the *venue* closed. The
-`.P` suffix on `tv_symbol` (`BTCUSDT.P`) is what separates a perpetual from the spot pair of the
-same name — they share nothing but the name.
+with `live_tradable = false`, so a live launch on one is refused: no broker arm here trades a
+perpetual. The `.P` suffix on `tv_symbol` (`BTCUSDT.P`) is what separates a perpetual from the spot
+pair of the same name — they share nothing but the name.
+
+**A batch run on one books funding and models liquidation**, staged server-side for every backtest,
+sweep, robustness and stress job whose symbols have the data, with nothing to pass:
+
+- **Funding** is booked as cash per settlement (a positive rate means longs pay shorts, so a short
+  is credited) and reported **beside** the price leg, never folded into it silently:
+  `summary.funding` carries `booked`, `booked_pct`, `traded_pnl_pct`, `total_pnl_pct`, `source` and
+  `included_in_net`, the last saying whether the engine that wrote the file already added it to
+  `net_pnl_pct` (the portfolio engine does, the single-instrument engine does not). A book also
+  carries `legs[].funding`, which is worth reading: one leg funded and one not looks identical in
+  the totals to a fully funded book. It is `null` on anything with no perpetual side, and such runs
+  are byte-identical to before.
+- **Liquidation** force-closes the position on the bar the venue's maintenance-margin ladder would
+  have closed it, reported as its own `exit_reason: "Liquidated"` rather than as a stop. It is
+  tested against the bar's adverse extreme (a wick liquidates you in reality) and runs after the
+  strategy's own exits (a sane stop sits inside the liquidation level). **Read it as a band, not a
+  dated event**: only today's ladder is published anywhere, so a 2020 bar is margined against a
+  2026 schedule.
+
+This matters most in a **sweep**, which ranks rather than reports — an optimizer with no margin
+call is rewarded for picking the most over-levered cell in the grid.
 
 ### GET /api/v1/data/catalog → array of cached OHLCV datasets
 ```

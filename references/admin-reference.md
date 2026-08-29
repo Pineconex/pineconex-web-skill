@@ -168,7 +168,8 @@ saxo_uic (int|null), saxo_symbol, saxo_asset_type,
 yahoo_ticker, massive_ticker, ibkr_symbol, ibkr_exchange,
 alpaca_us_symbol, alpaca_eu_symbol, bitstamp_pair, binance_pair,
 mintick (float|null), currency, enabled (bool), live_tradable (bool),
-wikipedia_article, reddit_query, sec_cik, google_trends_query, unusualwhales_ticker
+wikipedia_article, reddit_query, sec_cik, google_trends_query, unusualwhales_ticker,
+instrument_type, isin, base_currency, tob_rate (float|null)
 ```
 
 ### POST /api/admin/symbols → `201` · PATCH /api/admin/symbols/{id} → `200`
@@ -193,13 +194,13 @@ it also makes the symbol **live-tradable on Binance**, not merely fetchable: a b
 migration only. `BTCUSDT` is both a spot pair and a perpetual, sharing nothing but the name, so a
 new perpetual row needs a migration rather than a `POST`.
 
-#### Six fields are the exception to full-replace
+#### Ten fields are the exception to full-replace
 
-`live_tradable` and the five non-price mappings do **not** follow the erase-if-absent rule above.
-Omitting them leaves the stored value untouched. That is deliberate in both cases and for the same
-reason: a client that predates a field would otherwise wipe it while editing something unrelated.
-Note `binance_pair` is **not** among them — it is a broker/price mapping and follows full-replace,
-exactly as `bitstamp_pair` does.
+`live_tradable`, the five non-price mappings and the four reference-data fields do **not** follow
+the erase-if-absent rule above. Omitting them leaves the stored value untouched. That is deliberate
+in every case and for the same reason: a client that predates a field would otherwise wipe it while
+editing something unrelated. Note `binance_pair` is **not** among them — it is a broker/price
+mapping and follows full-replace, exactly as `bitstamp_pair` does.
 
 | Field | Omitted | `""` | Value |
 |---|---|---|---|
@@ -209,6 +210,10 @@ exactly as `bitstamp_pair` does.
 | `sec_cik` | unchanged | clears | set (trimmed) |
 | `google_trends_query` | unchanged | clears | set (trimmed) |
 | `unusualwhales_ticker` | unchanged | clears | set (trimmed) |
+| `instrument_type` | unchanged | clears | set (trimmed) |
+| `isin` | unchanged | clears | set (trimmed) |
+| `base_currency` | unchanged | clears | set (trimmed) |
+| `tob_rate` (float) | unchanged | — | set |
 
 **`live_tradable`** marks a row as *data-only*: a cash index has a price series but is not an
 instrument anyone can hold, so it backtests and sweeps while live launch refuses it with a `400`
@@ -226,6 +231,24 @@ symbol. None is derivable from the ticker, which is why each is stored rather th
 materially different Google Trends series. `sec_cik` is the **issuer's** Central Index Key, and a
 foreign private issuer has none — it files a 20-F and is exempt from Section 16 — so leave it null
 for every non-US listing rather than mapping a CIK that will never produce a filing.
+
+`cnn_series` and `esef_lei` gate the two remaining non-price sources and are **not settable over
+this API**, for the same reason as `binance_market_type`: `CNN:FEARGREED` is one market-wide row and
+the `ESEF:` factor rows are a seeded set with hand-checked LEIs, so both are written by migration.
+
+**The four reference-data fields feed `syminfo.*`**, which the interpreter used to answer by itself:
+`syminfo.type` read the string `"stock"` on every instrument the platform had ever run, so
+`syminfo.type == "crypto"` was false on BTCUSD with no error and no `na`. That is what the
+leave-alone semantics above protect — a verbatim write would blank `instrument_type` the first time
+an older client edited a symbol's currency, and a blank does not read as missing, it reads as the
+old default.
+
+| Field | Notes |
+|---|---|
+| `instrument_type` | **CHECK-constrained** to TradingView's value set (`stock`, `fund`, `index`, `forex`, `futures`, `crypto`, `cfd`, `bond`, `commodity`, `economic`), so a typo is a `500` from the constraint rather than a symbol that types as nothing. Invented values like `etf` match nothing a TradingView script would test for. |
+| `isin` | `syminfo.isin`. A fund is identified by nothing else: two share classes of one fund differ by a letter in the ticker and by the whole tax treatment. |
+| `base_currency` | `syminfo.basecurrency`, the BASE leg of a pair (`BTC` of `BTCUSD`) where `currency` is the quote. Equal to `currency` on a cash instrument, which is why copying the quote into both went unnoticed until crypto and FX arrived. |
+| `tob_rate` | Transaction-tax rate in **percent** (`0.12`, `1.32`), surfaced as `syminfo.tob` for a script to read. **A numeric field has no clearing sentinel** — omit it to keep what is stored. A stored `0.0` means "not taxed" and NULL means "unknown"; the engine reports NULL as `na` so a strategy can tell them apart. It is a reading, never a cost the engine charges: Pine's percent commission is linear and two-sided, so it can express neither the tax's per-transaction cap nor a one-sided levy. |
 
 
 **`wikipedia_article` may hold a title CHAIN, `current|former`, summed per day** — `Amazon
