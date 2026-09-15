@@ -417,7 +417,18 @@ P&L at all, so the broker account remains the source of truth for money.
 **Prop-firm futures (`broker: "propfirm"`) is live-only and unusually sharp.** The firm's daily
 loss limit, trailing drawdown and flat-by time are enforced on the *firm's* side and are invisible
 to the bot — a breach flattens every position and locks the account mid-session. There is no
-`propfirm` data source, so backtest from another source.
+`propfirm` data source, so backtest from another source. Two gateways exist. **Tradovate is one
+login and names no firm**: the prop firms on it (Apex, Take Profit Trader, Lucid, Tradeify) email
+a Tradovate username + password with the account, so connect with `env` (`demo`/`live`) +
+`username` + `password`. The `cid`/`sec` API key pair is **optional, both or neither** — but
+Tradovate refuses an API login with no registered app (`"The app is not registered"`), and that
+registration is the pair. A prop-firm evaluation account cannot mint one, so ask the user for a
+key from their **own funded** Tradovate account; without one the connect call fails at the venue
+and the 400 explains why — do not tell them to re-type the password. Also set `bar_source` to
+`"yahoo"` or `"massive"`: Tradovate serves no bars over its API without a CME sub-vendor licence,
+so on the default `"broker"` an unlicensed account's bot never warms up. **Topstep connects
+through TopstepX (ProjectX) with `firm_id` + username + API key**, and if that key reaches several
+tradable accounts the connect call refuses until `account_id` names one.
 
 **Futures expire, and that is the one launch where the instrument has an end.** Two venues trade
 them: `propfirm` (CME) and `saxo` (Eurex / Euronext); every other broker refuses a futures symbol,

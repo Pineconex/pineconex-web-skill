@@ -1256,7 +1256,7 @@ every venue; the order model underneath is not, and the difference is not guessa
 | **Binance** (spot) | USDT spot pairs (iff `binance_pair` is non-null) | A **real** `STOP_LOSS_LIMIT` rests at the exchange, so unlike Bitstamp the position is protected between bars. Only **one** exit can rest (a resting sell reserves the base balance), so the stop takes the slot and the take-profit is **bot-managed** — Alpaca crypto's shape. A pair whose own `orderTypes` omit `STOP_LOSS_LIMIT` is demoted to the synthetic stop and the bot says so at startup. Long-only. Fees are taken in the coin, so exits are sized from the exchange's free balance rather than from the bot's book. |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
-| **PropFirm** | CME futures, through the firm's gateway (Tradovate) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. |
+| **PropFirm** | CME futures, through the firm's gateway (Tradovate, or ProjectX for Topstep) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. **Exits differ by gateway**: Tradovate rests a stop + take-profit bracket; ProjectX documents no OCO between standalone orders, so it rests the **stop only** and the take-profit is bot-managed at bar close (Alpaca crypto's shape). Neither gateway has been exercised against its venue yet. |
 
 #### Futures and expiry (`futures_auto_roll`)
 
@@ -1841,7 +1841,7 @@ that is persisted.
 | **Alpaca** | yes | `POST /alpaca/keys` — key id + secret (the OAuth flow is browser-only) |
 | **Lightspeed** | yes | `POST /lightspeed/credentials` |
 | **IBKR** | yes | `POST /ibkr/settings` — host/port of your own TWS or Gateway |
-| **Prop firm** | yes | `POST /propfirm/credentials` — firm id + login + the app id/cid/secret the firm issued |
+| **Prop firm** | yes | `POST /propfirm/credentials` — Tradovate: `env` + the username/password the firm emailed you, plus an optional API key pair (`cid`/`sec`) from your own funded Tradovate account, since the venue refuses an API login with no registered app; Topstep / TopstepX: firm id + username + API key |
 | **Saxo** | **no** | OAuth + PKCE redirect; must be completed in the web UI |
 
 ### Saxo — `GET /api/v1/saxo/status`
@@ -1958,30 +1958,77 @@ each live bot is assigned `base+1` upward, skipping ids already in use by your r
 ### Prop firm — `GET /api/v1/propfirm/firms` → array
 ```
 id       uuid
-name     string   (the firm, e.g. "Apex")
-gateway  string   ("tradovate")
+name     string   ("Tradovate", or a ProjectX firm such as "Topstep")
+gateway  string   ("tradovate" | "projectx")
 env      string   ("demo"|"live")
 ```
-The firm is **data**, the gateway is code: onboarding a new firm is a row, not a release. Pick an
-`id` from this list for the connect call.
+Only **ProjectX** connections name a firm from this list — there the host is per firm. Tradovate
+is one login: the prop firms on it (Apex, Take Profit Trader, Lucid, Tradeify) run no backend of
+their own and email a Tradovate username and password with the account, so the Tradovate connect
+call names an `env`, never a firm.
 
 ### POST /api/v1/propfirm/credentials → `204`
+
+For **Tradovate** (any prop firm on it, or your own Tradovate account) — omit `firm_id`:
 ```
-firm_id   uuid    required  (from /propfirm/firms)
-username  string  required  (your gateway login)
-password  string  required
-app_id    string  required  \
-cid       string  required   > issued BY THE FIRM together with the account — we mint nothing
-sec       string  required  /
+env           string  optional  ("demo", the default, for simulated and evaluation accounts;
+                                 "live" for funded and real-money ones — different hosts)
+username      string  required  (the Tradovate login your firm emailed you)
+password      string  required
+cid           string  optional  (a Tradovate API key, minted on YOUR account — see below)
+sec           string  optional  (its secret; both halves or neither)
+bar_source    string  optional  ("broker", the default, | "yahoo" | "massive" — where live bots
+                                 read BARS from; orders always go to Tradovate)
+is_automated  bool    optional  (default true; CME Tag 1028 on every order the bot places)
 ```
-Verified against the venue before anything is stored, so a bad credential fails here rather than
-at bot launch. Two failure modes that do not look like failures are handled for you: a rejected
-login answers **HTTP 200** with an `errorText` body, and too many attempts answers 200 with a
-rate-limit penalty rather than a token (that is a lockout, not a wrong password). The account must
+**The API key pair is optional, and half a pair is refused before the network is touched**
+(`400 "a Tradovate API key is a PAIR — send both the Key (cid) and the Secret, or neither"`).
+Tradovate requires a **registered app** to log in over its API, and that registration is a
+`cid` + `sec` pair. A prop-firm evaluation account has no API Access tab and cannot mint one;
+a key from your **own funded** Tradovate account may work here (trader.tradovate.com → Settings
+→ API Access → Generate API Key; needs a live balance over $1,000 plus the $25/mo API Access
+add-on, granted Contract Library, Orders, Positions, Account Information and Market Data). Sent
+with no pair, the login is attempted as-is and the venue decides. **Measured 2026-09-12 on a
+prop-firm demo login with no pair: Tradovate answers `"The app is not registered"`** — it is
+refusing the application, not the login — and the `400` you get back says so and repeats the
+guidance above. PineconeX holds no vendor pair (the Tradovate Partner-program credential that
+lets PickMyTrade and its peers log any account in), so today a prop-firm-only account cannot
+connect; that is the venue's rule, not a wrong password.
+
+`bar_source` exists because **Tradovate serves no market data over its API without a CME
+sub-vendor licence** (about $290/month plus a whitelist step by Tradovate), bars and ticks
+alike. On `"broker"` a bot on an unlicensed account cannot warm up and will not start; `"yahoo"`
+or `"massive"` runs it on bars about 10 minutes behind on futures, which is fine for a strategy
+deciding at the close of a 60m or daily bar and too slow for a 1m or 5m one. Order routing is
+unaffected either way. `is_automated` is the account holder's declaration to the exchange:
+CME's own definition (RA1210-5) makes a bot-built order automated, so leave it `true` unless
+your firm tells you otherwise.
+
+For a **`projectx`** firm (Topstep, via TopstepX):
+```
+firm_id     uuid    required  (from /propfirm/firms)
+username    string  required  (the TopstepX username the key was minted for)
+api_key     string  required  (minted in the TopstepX dashboard: Settings → API → Add API Key;
+                               API access is a paid add-on there)
+account_id  int     optional  (which account a bot trades — see below)
+```
+One ProjectX API key covers **every account** under the profile, and a Topstep user typically has
+several (Trading Combines, an Express Funded account, a Live one). If exactly one can trade it is
+chosen for you; if more than one can, the call is refused
+`400 "this API key reaches N tradable accounts — send account_id …"` and the message **lists them
+by id and name** so the retry can pick. The API never guesses which account trades.
+
+Either way the credential is verified against the venue before anything is stored, so a bad one
+fails here rather than at bot launch. Failure modes that do not look like failures are handled
+for you: Tradovate answers a rejected login **HTTP 200** with an `errorText` body, and too many
+attempts with a rate-limit penalty rather than a token (a lockout, not a wrong password);
+ProjectX answers a rejected key 200 with `success: false`, and a key minted at a *different*
+ProjectX firm fails with the host named, because keys are per firm. A Tradovate account must
 have **API market data enabled** — its absence is failed at connect, because otherwise no bars can
 be fetched and the bot would die at warmup days later.
 
-`GET /api/v1/propfirm/status` → `{ connected, firm, gateway, env, account }`.
+`GET /api/v1/propfirm/status` → `{ connected, firm, gateway, env, account, is_automated, bar_source }`
+(`bar_source` is `null` when bars come from the execution venue).
 `DELETE /api/v1/propfirm/disconnect` → `204`.
 
 **Live trading only.** There is no `propfirm` data source: gateway market data is entitled per
@@ -2037,7 +2084,9 @@ Changing `github_linked_repo` also moves the sync webhook: it is deleted from th
 registered on the new one.
 
 ### PUT /api/v1/auth/me/brokers — which broker cards the web UI shows → the stored array
-`{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `binance`, `propfirm`,
+`{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `binance`, `propfirm`
+(the Tradovate card), `topstepx` (the TopstepX card — a UI id only; it shares the prop-firm
+connector and launches as `broker: "propfirm"`),
 `ibkr`, `ibkr_web`, `lightspeed`; an unknown id is a `400`. The list is sorted and de-duplicated before
 storing, and `[]` shows every card again.
 
