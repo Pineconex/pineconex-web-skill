@@ -1222,10 +1222,11 @@ paths:
     get:
       operationId: listPropFirms
       tags: [Brokers]
-      summary: The prop firms that can be connected.
+      summary: The prop-firm gateway rows that can be connected.
       description: >-
-        Each entry is { id, name, gateway, env } — the firm is data, the gateway (e.g. tradovate)
-        is the code path. Pick an id for POST /api/v1/propfirm/credentials.
+        Each entry is { id, name, gateway, env }. Only a ProjectX connection names one of these
+        (the host is per firm there). Tradovate is one login for every prop firm on it, so a
+        Tradovate connect names an env instead and never reads this list.
       responses:
         "200":
           description: Firms.
@@ -1239,7 +1240,8 @@ paths:
       summary: Prop-firm connection status.
       description: >-
         Returns { connected, firm, gateway, env, account }. `env` is "demo" or "live" (the firm's
-        funded capital under its evaluation rules) and is fixed by the firm you connected to.
+        funded capital under its evaluation rules): chosen at connect on Tradovate, fixed by the
+        firm on ProjectX.
       responses:
         "200":
           description: Status.
@@ -1250,7 +1252,7 @@ paths:
     post:
       operationId: propfirmConnect
       tags: [Brokers]
-      summary: Connect a prop-firm account (login + firm-issued app identity).
+      summary: Connect a prop-firm account (Tradovate login, or a ProjectX API key).
       description: >-
         Verified against the gateway before anything is stored, so a bad credential fails here
         rather than at bot launch. The account must have API market data enabled — its absence is
@@ -1264,7 +1266,7 @@ paths:
             schema: { $ref: "#/components/schemas/PropFirmCredentials" }
       responses:
         "204": { description: Connected. }
-        "400": { description: Unknown firm, missing field, rejected login, lockout, or no API market-data entitlement. }
+        "400": { description: Unknown firm, missing field, half an API key pair, rejected login ("The app is not registered" when sent with no key pair), lockout, or no API market-data entitlement. }
   /api/v1/propfirm/disconnect:
     delete:
       operationId: propfirmDisconnect
@@ -1890,14 +1892,29 @@ components:
             thin book. live = REAL MONEY (api.binance.com).
     PropFirmCredentials:
       type: object
-      required: [firm_id, username, password, app_id, cid, sec]
+      description: >-
+        Two shapes. Tradovate (any prop firm on it — Apex, Take Profit Trader, Lucid, Tradeify —
+        or your own account): omit firm_id, send env + username + password, and optionally a
+        cid + sec API key pair minted on your OWN funded Tradovate account. Tradovate requires a
+        registered app to log in over its API and that registration IS the pair; a prop-firm
+        evaluation account cannot mint one, and PineconeX holds no vendor pair, so a login sent
+        without one is attempted as-is and the venue answers "The app is not registered" (400,
+        with the guidance repeated). Half a pair is refused before the network is touched.
+        projectx (Topstep via TopstepX): firm_id + username + api_key, plus account_id when the
+        key reaches more than one tradable account — the API lists the candidates in the 400
+        rather than guessing which account trades.
+      required: [username]
       properties:
-        firm_id: { type: string, format: uuid, description: From GET /api/v1/propfirm/firms. }
-        username: { type: string, description: Your gateway login. }
-        password: { type: string }
-        app_id: { type: string, description: Issued BY THE FIRM together with the account — PineconeX mints nothing. }
-        cid: { type: string, description: Issued by the firm with the account. }
-        sec: { type: string, description: Issued by the firm with the account. }
+        firm_id: { type: string, format: uuid, description: ProjectX only, from GET /api/v1/propfirm/firms. Omit for Tradovate. }
+        env: { type: string, enum: [demo, live], default: demo, description: Tradovate only. demo = simulated and evaluation accounts (demo.tradovateapi.com); live = funded and real-money accounts (live.tradovateapi.com). A login does not say which, so name it. }
+        username: { type: string, description: The Tradovate login your firm emailed you, or the TopstepX username the API key was minted for (ProjectX). }
+        password: { type: string, description: Tradovate only. }
+        cid: { type: string, nullable: true, description: "Tradovate only, optional. Your own API key (trader.tradovate.com → Settings → API Access → Generate API Key; needs a live balance over $1,000 plus the API Access add-on). Send both cid and sec or neither." }
+        sec: { type: string, nullable: true, description: Tradovate only, optional. The API key's secret. Encrypted at rest. }
+        bar_source: { type: string, enum: [broker, yahoo, massive], default: broker, description: "Where live bots read BARS from; orders always go to the venue. Tradovate serves no market data over its API without a CME sub-vendor licence, so on broker an unlicensed account's bot cannot warm up; yahoo and massive are about 10 minutes behind on futures, fine at 60m and daily, too slow at 1m/5m." }
+        is_automated: { type: boolean, default: true, description: "CME Tag 1028 on every order the bot places — the account holder's declaration. CME's own definition makes a bot-built order automated; leave true unless your firm says otherwise." }
+        api_key: { type: string, description: ProjectX only. Minted in the firm's dashboard (TopstepX Settings → API); a paid add-on there. }
+        account_id: { type: integer, description: ProjectX only, optional. Which account under the key a bot trades; required when more than one can trade. }
     CatalogEntry:
       type: object
       properties:
