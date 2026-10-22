@@ -1139,6 +1139,8 @@ symbols             array   optional  (string[]; ≥2 entries = a multi-symbol B
 mode                string  optional  ("single"|"basket"(default)|"portfolio") — which of the
                                        three live modes to run. Only `portfolio` changes
                                        behaviour; omit it for the historical basket semantics
+aggregate           bool    optional  (prop-firm only, Pro — net this bot through the ACCOUNT
+                                       AGGREGATOR; see "The account aggregator" below)
 leverage            number  optional  (portfolio only; default 1.0, must be in (0,4]) — the
                                        book's gross-exposure cap as a multiple of ACCOUNT equity
 timeframe           string  required  (live subset: "5m","15m","30m","60m","90m","1D" — no
@@ -1154,6 +1156,8 @@ params_override     object  optional  { var_name: number|bool }
 broker              string  optional  ("saxo"(default)|"alpaca"|"ibkr"|"lightspeed"|"bitstamp"
                                        |"binance"|"propfirm")
 saxo_env            string  optional  ("sim"|"live"; Saxo only)
+propfirm_connection_id uuid optional  (propfirm only: which login, from /propfirm/status connections[].id)
+propfirm_account_id int    optional  (propfirm only: which account under it, connections[].accounts[].id)
 webhook_url         string  optional  (http/https; receives order/trade/fill events; PRO)
 options_routing     bool    optional  (default false; ALPACA ONLY — see below)
 options_params      object  optional  (per-bot options knobs; ignored unless options_routing)
@@ -1161,6 +1165,12 @@ futures_auto_roll   bool    optional  (default true; FUTURES ONLY — roll the p
                                        next delivery month instead of holding a contract that
                                        stops trading. See below)
 ```
+
+**A prop-firm launch names its login and account when the user holds more than one.** With a
+single login carrying a single account both may be omitted; otherwise the launch is refused with a
+`400` that names the missing field (`propfirm_connection_id` or `propfirm_account_id`) and lists
+the candidates by id. The API never guesses which account
+trades. A restarted bot comes back on the login and account its launch resolved.
 
 `broker` is matched **exactly** — no trimming, no case-folding. `"Saxo"` is rejected
 `400 unknown broker 'Saxo' — supported: saxo, alpaca, lightspeed, ibkr, bitstamp, binance,
@@ -1216,6 +1226,31 @@ so the ceiling follows the account. Constraints, all `400`:
   clamp every leg to zero, and the bot would run, log signals and never trade.
 - The mode survives an auto-restart — a portfolio comes back as a portfolio, cap included.
 
+**`aggregate: true` nets this bot with every other aggregated bot on the same prop-firm account
+and contract (Pro).** Each bot is an ordinary job — its own strategy, its own timeframe, started
+and stopped on its own — that trades a VIRTUAL position: entries fill at the bar close, the
+`strategy.exit` stop and limit are checked against each bar, closes book at the bar close, exactly
+as its backtest does. The runner's aggregator for the account holds the sum of every such bot and
+sends the venue only the difference, as market orders. One emergency stop rests at the venue,
+sized to the net position, 1.5% from its average entry; it exists for a dead aggregator, not for
+the strategies.
+
+- **Prop-firm accounts only** (`broker: "propfirm"`), one `symbol`, an intraday timeframe, no
+  `symbols`, HTF/intrabar or options routing. Every aggregated bot on the account must run on the
+  same runner; the launch pins it there.
+- **The account must hold exactly what the bots hold when the aggregator starts** — normally
+  flat. A mismatch halts the aggregator before it sends anything, naming both numbers.
+- **A change the aggregator did not make halts it**: the emergency stop filling, the firm
+  flattening the account, a hand trade. The bots keep running virtually; nothing more reaches
+  the venue until the aggregator is restarted (stop and relaunch any aggregated bot).
+- Bar-close only: `calc_on_every_tick` is ignored, and an aggregated bot does **not** roll
+  futures. Stop and relaunch on the new contract month.
+- **A plain stop leaves the bot's virtual position in the net**, as a plain stop leaves a real
+  position; relaunching resumes it. `DELETE ?flatten=true` withdraws it and the aggregator trades
+  the account down. The bot's own fills are its virtual trades; the account's real fills are the
+  aggregator's ledger.
+- The aggregator exits by itself once no bot has written for 15 minutes and the account is flat.
+
 **`options_routing` hands execution to the options runtime (Alpaca only).** Each signal is scored
 across the underlying shares and the option chain and the better risk-adjusted expression is
 placed. It is refused `400` on any other broker ("no other broker's option order model has been
@@ -1256,7 +1291,7 @@ every venue; the order model underneath is not, and the difference is not guessa
 | **Binance** (spot) | USDT spot pairs (iff `binance_pair` is non-null) | A **real** `STOP_LOSS_LIMIT` rests at the exchange, so unlike Bitstamp the position is protected between bars. Only **one** exit can rest (a resting sell reserves the base balance), so the stop takes the slot and the take-profit is **bot-managed** — Alpaca crypto's shape. A pair whose own `orderTypes` omit `STOP_LOSS_LIMIT` is demoted to the synthetic stop and the bot says so at startup. Long-only. Fees are taken in the coin, so exits are sized from the exchange's free balance rather than from the bot's book. |
 | **Lightspeed** | US equities | Market orders only — nothing rests, so nothing protects. |
 | **IBKR** | US equities | Market orders only. |
-| **PropFirm** | CME futures, through the firm's gateway (Tradovate, or ProjectX for Topstep) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. **Exits differ by gateway**: Tradovate rests a stop + take-profit bracket; ProjectX documents no OCO between standalone orders, so it rests the **stop only** and the take-profit is bot-managed at bar close (Alpaca crypto's shape). Neither gateway has been exercised against its venue yet. |
+| **PropFirm** | CME futures, through the firm's gateway (Tradovate, ProjectX for Topstep, or Rithmic) | Live trading **only** — a prop-firm gateway is an execution rail, its market data is entitled per account and non-redistributable, so there is no backtest path and no catalog entry. The bot resolves the **front month** at launch and re-checks it hourly (`futures_auto_roll`, below). The firm's daily loss limit, trailing drawdown and flat-by time are enforced on *its* side and are invisible to the bot: a breach flattens every position and locks the account, which is a way for a position to vanish with none of the bot's orders filling. **Exits differ by gateway**: Tradovate rests a stop + take-profit bracket; ProjectX documents no OCO between standalone orders, so it rests the **stop only** and the take-profit is bot-managed at bar close (Alpaca crypto's shape). Rithmic rests a stop + take-profit OCO pair and falls back to the stop alone if the pair is refused. None of the three gateways has placed an order at its venue yet. |
 
 #### Futures and expiry (`futures_auto_roll`)
 
@@ -1371,7 +1406,9 @@ bot cancels the entry and exit orders it left at the broker (an unmanaged restin
 a stop-loss is a sell, and a sell with no position behind it can *open a short*). Whatever is held
 is left alone and named in the log as unprotected — closing it is the user's call, in their broker.
 Relaunching re-adopts and re-protects the position. Never tell a user that stopping the bot
-flattened them.
+flattened them. On the performance pages the stopped bot's leg is closed without a price (it
+leaves `open_positions` and counts as an unscored exit): the contracts are the account's now, and
+whichever bot adopts them records the eventual exit under its own job.
 
 ### Fleet snapshot — save the running live bots, restore them after an outage
 
@@ -1841,7 +1878,7 @@ that is persisted.
 | **Alpaca** | yes | `POST /alpaca/keys` — key id + secret (the OAuth flow is browser-only) |
 | **Lightspeed** | yes | `POST /lightspeed/credentials` |
 | **IBKR** | yes | `POST /ibkr/settings` — host/port of your own TWS or Gateway |
-| **Prop firm** | yes | `POST /propfirm/credentials` — Tradovate: `env` + the username/password the firm emailed you, plus an optional API key pair (`cid`/`sec`) from your own funded Tradovate account, since the venue refuses an API login with no registered app; Topstep / TopstepX: firm id + username + API key |
+| **Prop firm** | yes | Tradovate: **authorize in the browser** (`POST /propfirm/tradovate/oauth/connect` returns the URL to open) or `POST /propfirm/credentials` with username + password + your own API key pair. Connect as many logins as you hold, each with its accounts. Topstep / TopstepX: `POST /propfirm/credentials` with firm id + username + API key. Rithmic: `POST /propfirm/credentials` with a gateway row + `rithmic_system` + username + password |
 | **Saxo** | **no** | OAuth + PKCE redirect; must be completed in the web UI |
 
 ### Saxo — `GET /api/v1/saxo/status`
@@ -1958,51 +1995,79 @@ each live bot is assigned `base+1` upward, skipping ids already in use by your r
 ### Prop firm — `GET /api/v1/propfirm/firms` → array
 ```
 id       uuid
-name     string   ("Tradovate", or a ProjectX firm such as "Topstep")
-gateway  string   ("tradovate" | "projectx")
+name     string   ("Tradovate", a ProjectX firm such as "Topstep", or a Rithmic gateway such as
+                   "Rithmic Chicago")
+gateway  string   ("tradovate" | "projectx" | "rithmic")
 env      string   ("demo"|"live")
 ```
-Only **ProjectX** connections name a firm from this list — there the host is per firm. Tradovate
+**ProjectX** and **Rithmic** connections name a row from this list: a ProjectX row is the firm
+(its host is per firm), a Rithmic row is a regional gateway host. Tradovate
 is one login: the prop firms on it (Apex, Take Profit Trader, Lucid, Tradeify) run no backend of
 their own and email a Tradovate username and password with the account, so the Tradovate connect
 call names an `env`, never a firm.
 
-### POST /api/v1/propfirm/credentials → `204`
+### Tradovate — `POST /api/v1/propfirm/tradovate/oauth/connect` → `{ url }`
 
-For **Tradovate** (any prop firm on it, or your own Tradovate account) — omit `firm_id`:
+Tradovate connects **by authorization only**: the user logs in at trader.tradovate.com and grants
+PineconeX access. No username, password or API key is sent to the API. Open the returned `url` in
+the user's browser; Tradovate redirects back to the Live page when they are done.
 ```
-env           string  optional  ("demo", the default, for simulated and evaluation accounts;
-                                 "live" for funded and real-money ones — different hosts)
-username      string  required  (the Tradovate login your firm emailed you)
-password      string  required
-cid           string  optional  (a Tradovate API key, minted on YOUR account — see below)
-sec           string  optional  (its secret; both halves or neither)
-bar_source    string  optional  ("broker", the default, | "yahoo" | "massive" — where live bots
-                                 read BARS from; orders always go to Tradovate)
+env           string  optional  ("demo" | "live": where the code is exchanged when Tradovate does
+                                 not say; accounts are read from both hosts either way)
 is_automated  bool    optional  (default true; CME Tag 1028 on every order the bot places)
 ```
-**The API key pair is optional, and half a pair is refused before the network is touched**
-(`400 "a Tradovate API key is a PAIR — send both the Key (cid) and the Secret, or neither"`).
-Tradovate requires a **registered app** to log in over its API, and that registration is a
-`cid` + `sec` pair. A prop-firm evaluation account has no API Access tab and cannot mint one;
-a key from your **own funded** Tradovate account may work here (trader.tradovate.com → Settings
-→ API Access → Generate API Key; needs a live balance over $1,000 plus the $25/mo API Access
-add-on, granted Contract Library, Orders, Positions, Account Information and Market Data). Sent
-with no pair, the login is attempted as-is and the venue decides. **Measured 2026-09-12 on a
-prop-firm demo login with no pair: Tradovate answers `"The app is not registered"`** — it is
-refusing the application, not the login — and the `400` you get back says so and repeats the
-guidance above. PineconeX holds no vendor pair (the Tradovate Partner-program credential that
-lets PickMyTrade and its peers log any account in), so today a prop-firm-only account cannot
-connect; that is the venue's rule, not a wrong password.
+**One login can hold demo AND live accounts** (e.g. `DEMO…` and a real-money `LIVE…`); Tradovate
+serves each from its own host, so a login's accounts are read from both and each carries its own
+`env`. A bot trades an account on that account's host. A `live` account trades REAL MONEY.
+**A user may connect several Tradovate logins** (an Apex login, a Lucid login, a personal one),
+one authorization each. Authorizing a login the user already holds refreshes it rather than adding
+a second. **Each login may carry several accounts** (Apex hands out many on one username); all of
+them are listed in the status below. The platform keeps every login's session alive; one that
+lapses reports `needs_reauth: true` and needs a fresh authorization.
 
-`bar_source` exists because **Tradovate serves no market data over its API without a CME
-sub-vendor licence** (about $290/month plus a whitelist step by Tradovate), bars and ticks
-alike. On `"broker"` a bot on an unlicensed account cannot warm up and will not start; `"yahoo"`
-or `"massive"` runs it on bars about 10 minutes behind on futures, which is fine for a strategy
-deciding at the close of a 60m or daily bar and too slow for a 1m or 5m one. Order routing is
-unaffected either way. `is_automated` is the account holder's declaration to the exchange:
-CME's own definition (RA1210-5) makes a bot-built order automated, so leave it `true` unless
-your firm tells you otherwise.
+`is_automated` is the account holder's
+declaration to the exchange: CME's own definition (RA1210-5) makes a bot-built order automated, so
+leave it `true` unless your firm tells you otherwise.
+
+### POST /api/v1/propfirm/credentials → `204`
+
+For **Tradovate** by username and password (the alternative to authorizing), omit `firm_id`:
+```
+username      string  required  (your Tradovate login)
+password      string  required
+cid           string  optional  (a Tradovate API key minted on YOUR account)
+sec           string  optional  (its secret; both halves or neither)
+is_automated  bool    optional  (default true; CME Tag 1028)
+```
+Each login becomes one more connection beside any others, with every account under it on both hosts,
+the same as an authorized login. Tradovate requires a **registered app** to log in over its API, and
+that registration is the `cid` + `sec` pair (trader.tradovate.com → Settings → API Access →
+Generate API Key; needs a funded account and the API Access add-on). Sent with no pair, the venue
+answers `"The app is not registered"` and the `400` explains it. A rejected login answers HTTP 200
+with an `errorText` body and too many attempts a rate-limit penalty; both come back as named
+errors, never as success.
+
+
+For a **`rithmic`** gateway row (a prop firm on Rithmic, Rithmic 01, or Rithmic Paper Trading):
+```
+firm_id         uuid    required  (a gateway row from /propfirm/firms, e.g. "Rithmic Chicago")
+rithmic_system  string  required  (one of GET /propfirm/rithmic/systems?firm_id=…)
+username        string  required  (the Rithmic login, the one R|Trader Pro takes)
+password        string  required
+is_automated    bool    optional  (default true; CME Tag 1028)
+bar_source      string  optional  ("broker" (default) | "massive" | "yahoo"; bars only, orders
+                                   always go to Rithmic)
+```
+The login is verified at the venue before anything is stored, and every account under it is
+listed with its FCM and IB ids (`accounts[].fcm_id` / `ib_id`; `name` is Rithmic's account id).
+A refused login quotes Rithmic's own `rp_code` text. **Rithmic admits an application to its
+production systems only after its conformance test**; before that only `Rithmic Test` accepts the
+login, so a refusal on another system may be the app rather than the password, and the `400` says
+so. One username on two systems (Rithmic 01 and Rithmic Paper Trading) is two connections. Rithmic
+logins coexist with Tradovate and TopstepX connections.
+
+`GET /api/v1/propfirm/rithmic/systems?firm_id=<gateway row>` → `["Apex", "Bulenox", …]`, asked of
+that gateway live (no login). The regional hosts serve different lists.
 
 For a **`projectx`** firm (Topstep, via TopstepX):
 ```
@@ -2018,18 +2083,50 @@ chosen for you; if more than one can, the call is refused
 `400 "this API key reaches N tradable accounts — send account_id …"` and the message **lists them
 by id and name** so the retry can pick. The API never guesses which account trades.
 
-Either way the credential is verified against the venue before anything is stored, so a bad one
-fails here rather than at bot launch. Failure modes that do not look like failures are handled
-for you: Tradovate answers a rejected login **HTTP 200** with an `errorText` body, and too many
-attempts with a rate-limit penalty rather than a token (a lockout, not a wrong password);
-ProjectX answers a rejected key 200 with `success: false`, and a key minted at a *different*
-ProjectX firm fails with the host named, because keys are per firm. A Tradovate account must
-have **API market data enabled** — its absence is failed at connect, because otherwise no bars can
-be fetched and the bot would die at warmup days later.
+The key is verified against the venue before anything is stored, so a bad one fails here rather
+than at bot launch. ProjectX answers a rejected key 200 with `success: false`, and a key minted at
+a *different* ProjectX firm fails with the host named, because keys are per firm. **TopstepX is a
+single connection and excludes Tradovate**: connecting it replaces every Tradovate login, and
+authorizing a Tradovate login removes a TopstepX connection. Rithmic logins are left alone by both.
 
-`GET /api/v1/propfirm/status` → `{ connected, firm, gateway, env, account, is_automated, bar_source }`
-(`bar_source` is `null` when bars come from the execution venue).
-`DELETE /api/v1/propfirm/disconnect` → `204`.
+`GET /api/v1/propfirm/status` → the newest connection at the top level (`connected, firm,
+gateway, env, account, is_automated, …`) plus **`connections`**, every connection newest first:
+```
+id                uuid     (what a launch names as propfirm_connection_id)
+firm, gateway, env, username   (a Rithmic connection's env follows its SYSTEM: "Rithmic Paper
+                               Trading" and "Rithmic Test" are demo, anything else live)
+rithmic_system    string   (Rithmic only)
+auth_method       string   ("oauth" | "password" | "api_key")
+accounts          array    [{ id, name, env, fcm_id, ib_id }] — every account under the login
+                           (propfirm_account_id). On Rithmic `id` is a stable numeric surrogate
+                           for the account and `name` is Rithmic's account id
+is_automated      bool
+oauth_expires_at  string
+needs_reauth      bool     (the authorization lapsed; authorize that login again)
+```
+`DELETE /api/v1/propfirm/disconnect?id=<connection id>` → `204` removes one login (`404` if it is
+not yours); without `id` it removes every connection.
+
+### GET /api/v1/propfirm/aggregators → `{ aggregators: [...] }`
+The account aggregators your `aggregate: true` bots net through (see "The account aggregator"
+under live launch), one per account and contract root, read from every runner and filtered to the
+accounts your prop-firm logins reach. A runner that cannot be reached contributes nothing rather
+than an error, so an empty list means "none visible right now", not "none exist".
+```
+account      string   the account name, as on GET /propfirm/status
+root         string   contract root (MNQ, MES, …)
+ticker       string   the contract the aggregator trades
+target       number   the sum of the bots' virtual positions
+venue_net    number   what the venue holds (null before the first read)
+halted       bool     a change the aggregator did not make stopped it; nothing more is sent
+halt_reason  string   why, by name (null unless halted)
+execution    bool     true = net changes are SENT to the venue; false = dry run, logged only.
+                      Decided by the bot that started the aggregator, not by each bot's own
+                      execute_orders. null on an aggregator older than runtime 2026.10.14
+updated      int      unix seconds of the aggregator's last status write
+bots         array    [{ slot, name, interval, size, age_secs }] — each bot's virtual position
+                      and how long since it last wrote (a stale age = a dead bot)
+```
 
 **Live trading only.** There is no `propfirm` data source: gateway market data is entitled per
 account and non-redistributable, so it is never cached into the shared catalog. Backtest a futures
@@ -2086,7 +2183,7 @@ registered on the new one.
 ### PUT /api/v1/auth/me/brokers — which broker cards the web UI shows → the stored array
 `{ "hidden": ["lightspeed", "ibkr"] }`. Ids: `saxo`, `alpaca`, `bitstamp`, `binance`, `propfirm`
 (the Tradovate card), `topstepx` (the TopstepX card — a UI id only; it shares the prop-firm
-connector and launches as `broker: "propfirm"`),
+connector and launches as `broker: "propfirm"`), `rithmic` (the Rithmic card, a UI id in the same way),
 `ibkr`, `ibkr_web`, `lightspeed`; an unknown id is a `400`. The list is sorted and de-duplicated before
 storing, and `[]` shows every card again.
 
@@ -2226,3 +2323,53 @@ under `/api/admin/*`. That surface is documented separately — see the
 - **Sizes:** request bodies are capped at 1 MiB (`413`); strategy source at 256 KiB (`400`).
 - **Symbols** are plain tickers (e.g. `AAPL`) — no `/`, `\`, or `..`; invalid symbols return `400`.
 - **Errors** are `{ "error": string }` with the HTTP status; `401` = missing/invalid/expired key.
+
+## Prop-firm scoring (`/api/prop`)
+
+Score a backtest under a prop firm's published rules (PROP_PERFORMANCE_PAGE.md, half 1). Private
+to the job's owner; descriptive only. The app surface is the **Prop trading** section (`/app/prop`).
+
+### `GET /api/prop/rule-sets`
+
+The captured rule catalogue: one row per firm / plan / account size / phase with its capture
+date, source URL, list price and the `rules` object the scorer reads (max loss limit and whether
+it trails end-of-day or intraday, lock, daily loss limit and whether a breach ends the account,
+eval target, payout minimum and caps, buffer, consistency share, minimum days, contract cap,
+split).
+
+### `POST /api/prop/score`
+
+```json
+{ "job_id": "<backtest job>", "plan": "LucidPro", "size_usd": 50000,
+  "sizes": [1, 2, 4, 8], "eval_price": null, "funded_price": null,
+  "cushion": 2000, "use_dll": false, "sims": 2000, "boots": 200, "seed": 42, "max_days": 120,
+  "overrides": null }
+```
+
+`sizes` are contracts per unit of the backtest's own size (1-12 values). `eval_price` defaults to
+the rule row's list price; `funded_price` to 0 on a plan with an evaluation and to the funded
+list price on a plan bought funded. `cushion` is what is left above the buffer at each payout.
+`overrides` patches both rule rows (e.g. `{"consistency": null}`).
+
+Returns, per size: the evaluation race (`p_pass`, median days, how the rest failed), the
+first-payout race (`p_payout`, median days), the account-life chain on the backtest's own day
+series (tickets bought, blown, evaluations passed, payouts, fees, gross, net to the trader, net
+per year, the cash curve and the ticket list) and bootstrap bands of net per year. Plus the
+rule rows used, the inputs as resolved, and `not_modelled` (`news_rule`, `max_daily_profit`).
+
+### Accounts and the cash ledger (`/api/prop/accounts`, `/api/prop/cash`)
+
+`GET /api/prop/discover` lists prop-firm accounts the user's live bots have traded (by the job's
+`propfirm_account_id`) with whether each is tracked. `POST /api/prop/accounts` tracks one:
+`{ account_id, connection_id?, label?, env: demo|live, plan|rule_set_id, size_usd?, phase: eval|funded,
+fee_per_side, start_balance?, started_at?, notes? }`. `GET /api/prop/accounts` returns a card per
+account: the rule row, the state (`alive`, `blown`, `passed`, `live`), a verdict sentence, balance,
+floor, room, trading days, closed trades, net P&L, payouts the ledger says were eligible, the cash
+totals and the bots that ran on it. `GET /api/prop/accounts/{id}` adds the day ledger (one row per
+18:00 New York trading day with the firm's flags) and the priced round trips. `PUT` re-judges the
+same fills under another plan or phase; `DELETE` stops tracking (cash entries stay, unassigned).
+
+`GET /api/prop/cash` is the trader's own cash across all accounts: entries, cumulative line, paid,
+received, net, per-account subtotals. `POST /api/prop/cash` adds `{ account_id?, kind: purchase|reset|
+rebuy|payout|fee_other, amount (negative = paid, positive = received after the split), occurred_at,
+note? }`; `PUT`/`DELETE /api/prop/cash/{id}`. Nothing in the cash ledger is inferred.

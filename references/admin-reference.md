@@ -560,9 +560,32 @@ pg_ok (bool), pg_ms|null, redis_ok (bool), redis_ms|null
 ```
 
 ### GET /api/admin/container-stats → per-user container load
-`{ runner_count, stats: [ { user_id, cpu_pct, mem_pct } ] }` — summed across all of that user's
-running containers on all runners. A user whose container no runner reports is **omitted from
-`stats` entirely** rather than appearing with zeros.
+`{ runner_count, cpu_count, stats: [ { user_id, cpu_pct, mem_used_mb, mem_limit_mb } ] }` —
+summed across all of that user's running containers on all runners. `cpu_pct` is Docker's
+per-container figure summed, so **100 = one core** (divide by 100 for cores; `cpu_count` is the
+fleet's total). Memory is MB used against the sum of those containers' caps — a percentage summed
+per container is meaningless (eleven idle bots read 124%). A user whose container no runner
+reports is **omitted from `stats` entirely** rather than appearing with zeros.
+
+### GET /api/admin/bar-hub → the Tradovate bar hub, per futures root
+Is the CURRENT front month's data in the runner's bar hub (what Tradovate bots are served) and in
+the catalog (what the recorder writes)? Reads the default runner's `/health`.
+```
+running, source, upstream, last_error, clients, recorder_enabled,
+front_checked_at, front_error, trading_day,
+roots: [ { root, symbols[], front, bot_contract, roll_previous, roll_exit_by,
+           front_expires, days_to_expiry, front_bars_1m, front_newest, front_updated,
+           most_traded, most_traded_volume_day, front_volume_day,
+           crossover, crossover_level, serving, serving_level,
+           recorded_contract, recorded_at, catalog_1m_rows, catalog_to,
+           recording, recording_level, bots, warning, warning_level,
+           contracts: [ { contract, bars_1m, newest, updated, volume_1h, is_front } ] } ]
+```
+`running: false` = the runner holds no bar hub. Every `*_level` is `ok` / `warn` / `bad`. A root is
+healthy only when Tradovate's front month, the month bots trade (`bot_contract`) and the month the
+hub actually streams agree and the ring is fresh (an update within 180 s): **a root whose
+watchlist carries the wrong month has a full-looking ring and serves a bot nothing**, which only
+`serving` reveals. `warning` fires 7 days before the front month expires.
 
 ---
 
@@ -707,6 +730,7 @@ field. Account-level opt-in/out lives on the user API at `/api/v1/newsletter/me`
 | GET | `/api/admin/health` | 200 |
 | GET | `/api/admin/health/history` | 200 |
 | GET | `/api/admin/container-stats` | 200 |
+| GET | `/api/admin/bar-hub` | 200 |
 | GET | `/api/admin/parse-stats` | 200 |
 | GET | `/api/admin/runtime-stats` | 200 |
 | GET | `/api/admin/validator-stats` | 200 |
