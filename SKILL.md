@@ -357,8 +357,9 @@ that beat its own null by a wide margin is a better candidate for one, not a sub
 1. Confirm with the user (broker, symbol, paper vs. live).
 2. Ensure the broker is connected: `auth "$PINECONEX_API_URL/api/v1/alpaca/status"` (or `saxo`,
    `ibkr`, `lightspeed`, `bitstamp`, `binance`, `propfirm`). If not connected, the user must connect
-   it in the web UI (OAuth) — except **Bitstamp**, **Binance** and **prop-firm** accounts, which
-   take credentials and can be connected over the API (`POST /api/v1/bitstamp/credentials`,
+   it in the web UI (OAuth; for Tradovate the web UI or the URL from
+   `POST /api/v1/propfirm/tradovate/oauth/connect`) — except **Bitstamp**, **Binance** and
+   **TopstepX**, which take credentials over the API (`POST /api/v1/bitstamp/credentials`,
    `POST /api/v1/binance/credentials`, `POST /api/v1/propfirm/credentials`).
 3. Launch:
    ```bash
@@ -417,18 +418,19 @@ P&L at all, so the broker account remains the source of truth for money.
 **Prop-firm futures (`broker: "propfirm"`) is live-only and unusually sharp.** The firm's daily
 loss limit, trailing drawdown and flat-by time are enforced on the *firm's* side and are invisible
 to the bot — a breach flattens every position and locks the account mid-session. There is no
-`propfirm` data source, so backtest from another source. Two gateways exist. **Tradovate is one
-login and names no firm**: the prop firms on it (Apex, Take Profit Trader, Lucid, Tradeify) email
-a Tradovate username + password with the account, so connect with `env` (`demo`/`live`) +
-`username` + `password`. The `cid`/`sec` API key pair is **optional, both or neither** — but
-Tradovate refuses an API login with no registered app (`"The app is not registered"`), and that
-registration is the pair. A prop-firm evaluation account cannot mint one, so ask the user for a
-key from their **own funded** Tradovate account; without one the connect call fails at the venue
-and the 400 explains why — do not tell them to re-type the password. Also set `bar_source` to
-`"yahoo"` or `"massive"`: Tradovate serves no bars over its API without a CME sub-vendor licence,
-so on the default `"broker"` an unlicensed account's bot never warms up. **Topstep connects
+`propfirm` data source, so backtest from another source. Two gateways exist. **Tradovate connects by browser authorization**
+(`POST /api/v1/propfirm/tradovate/oauth/connect` returns a URL the user opens) **or by
+username + password** (+ the user's own `cid`/`sec` API key pair) on `POST /api/v1/propfirm/credentials`. A login's accounts include demo AND live (real-money) ones, each with its own `env`;
+confirm with the user before launching on a live one. A user may hold **several Tradovate
+logins, each with several accounts** — read them from `GET /api/v1/propfirm/status`
+`connections[]`, and when there is more than one candidate send `propfirm_connection_id` +
+`propfirm_account_id` on the launch (it is refused otherwise, never guessed). Ask the user which
+account to trade rather than picking one. **Topstep connects
 through TopstepX (ProjectX) with `firm_id` + username + API key**, and if that key reaches several
-tradable accounts the connect call refuses until `account_id` names one.
+tradable accounts the connect call refuses until `account_id` names one. **Rithmic connects with a
+gateway row (`firm_id`) + `rithmic_system` + username + password**; list the systems a gateway
+serves with `GET /api/v1/propfirm/rithmic/systems?firm_id=…` and let the user pick theirs (their
+prop firm, `Rithmic 01`, or `Rithmic Paper Trading`, which is the demo one).
 
 **Futures expire, and that is the one launch where the instrument has an end.** Two venues trade
 them: `propfirm` (CME) and `saxo` (Eurex / Euronext); every other broker refuses a futures symbol,
